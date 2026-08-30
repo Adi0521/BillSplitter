@@ -1,10 +1,12 @@
 #include "auth/auth.h"
-#include <openssl/rand.h>
+#include <openssl/crypto.h>
 #include <openssl/evp.h>
+#include <openssl/rand.h>
 #include <pqxx/pqxx>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
 
 namespace auth {
 
@@ -63,11 +65,11 @@ std::optional<User> register_user(DbPool& pool,
     pqxx::work txn(*conn);
 
     try {
-        auto r = txn.exec_params(
+        auto r = txn.exec(
             "INSERT INTO users (email, display_name, password_hash, password_salt)"
             "  VALUES ($1, $2, $3, $4)"
             "  RETURNING id, email, COALESCE(display_name,''), created_at",
-            email, display_name, hash, salt);
+            pqxx::params{email, display_name, hash, salt});
 
         txn.commit();
 
@@ -89,11 +91,11 @@ std::optional<User> verify_credentials(DbPool& pool,
     auto conn = pool.acquire();
     pqxx::work txn(*conn);
 
-    auto r = txn.exec_params(
+    auto r = txn.exec(
         "SELECT id, email, COALESCE(display_name,''), created_at,"
         "       password_hash, password_salt"
         "  FROM users WHERE email = $1",
-        email);
+        pqxx::params{email});
     txn.commit();
 
     if (r.empty()) return std::nullopt;
@@ -102,7 +104,11 @@ std::optional<User> verify_credentials(DbPool& pool,
     std::string salt        = r[0][5].as<std::string>();
     std::string computed    = pbkdf2_hash(password, salt);
 
-    if (computed != stored_hash) return std::nullopt;
+    // Constant-time compare so response timing does not leak the hash prefix.
+    if (computed.size() != stored_hash.size() ||
+        CRYPTO_memcmp(computed.data(), stored_hash.data(), computed.size()) != 0) {
+        return std::nullopt;
+    }
 
     User u;
     u.id           = r[0][0].as<std::string>();
@@ -116,10 +122,10 @@ std::string create_session(DbPool& pool, const std::string& user_id) {
     std::string token = generate_token(32);
     auto conn = pool.acquire();
     pqxx::work txn(*conn);
-    txn.exec_params(
+    txn.exec(
         "INSERT INTO sessions (token, user_id, expires_at)"
         "  VALUES ($1, $2, now() + interval '30 days')",
-        token, user_id);
+        pqxx::params{token, user_id});
     txn.commit();
     return token;
 }
@@ -130,11 +136,11 @@ std::optional<User> get_session_user(DbPool& pool,
     auto conn = pool.acquire();
     pqxx::work txn(*conn);
 
-    auto r = txn.exec_params(
+    auto r = txn.exec(
         "SELECT u.id, u.email, COALESCE(u.display_name,''), u.created_at"
         "  FROM sessions s JOIN users u ON s.user_id = u.id"
         "  WHERE s.token = $1 AND s.expires_at > now()",
-        session_token);
+        pqxx::params{session_token});
     txn.commit();
 
     if (r.empty()) return std::nullopt;
@@ -150,7 +156,7 @@ std::optional<User> get_session_user(DbPool& pool,
 void delete_session(DbPool& pool, const std::string& session_token) {
     auto conn = pool.acquire();
     pqxx::work txn(*conn);
-    txn.exec_params("DELETE FROM sessions WHERE token = $1", session_token);
+    txn.exec("DELETE FROM sessions WHERE token = $1", pqxx::params{session_token});
     txn.commit();
 }
 

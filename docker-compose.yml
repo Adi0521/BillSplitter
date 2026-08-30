@@ -1,18 +1,30 @@
-version: '3.9'
-
+# Local development database.
+#
+# Host port 5433 (not 5432) so this does not collide with any other Postgres
+# already bound to the default port. The container still listens on 5432
+# internally, so DATABASE_URL uses 5433 from the host.
 services:
   postgres:
     image: postgres:16-alpine
+    container_name: billsplitter-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: billsplitter
       POSTGRES_PASSWORD: billsplitter
       POSTGRES_DB: billsplitter
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d:ro
+      # Deliberately no /docker-entrypoint-initdb.d mount: that path only fires
+      # on an empty volume and never for a hosted database, so schema would be
+      # applied two different ways and drift. scripts/migrate.sh is the only
+      # thing that applies migrations, everywhere.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U billsplitter -d billsplitter"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
 volumes:
   pgdata:

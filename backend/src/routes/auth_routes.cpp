@@ -9,7 +9,7 @@ using json = nlohmann::json;
 static const std::string SESSION_COOKIE_OPTS =
     "; HttpOnly; Path=/; SameSite=Lax; Max-Age=2592000";  // 30 days
 
-void register_auth_routes(crow::SimpleApp& app, DbPool& pool) {
+void register_auth_routes(BsApp& app, DbPool& pool) {
 
     // POST /api/auth/register
     // Body: { "email": "...", "password": "...", "display_name": "..." }

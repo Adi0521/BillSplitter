@@ -1,9 +1,9 @@
-#include <crow.h>
-#include <nlohmann/json.hpp>
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 
+#include "app.h"
 #include "db/db_pool.h"
 #include "routes/auth_routes.h"
 // Phase 2+ route headers will be #include'd here as they are implemented:
@@ -22,44 +22,51 @@ static std::string require_env(const char* name) {
     return val;
 }
 
-int main() {
-    std::string db_conn_str;
-    std::string app_base_url;
-    int         port = 8080;
+static std::string env_or(const char* name, const std::string& fallback) {
+    const char* val = std::getenv(name);
+    return (val && *val) ? std::string(val) : fallback;
+}
 
+int main() {
     try {
-        db_conn_str  = require_env("DATABASE_URL");
-        app_base_url = std::getenv("APP_BASE_URL")
-                           ? std::getenv("APP_BASE_URL")
-                           : "http://localhost:5173";
-        if (auto* p = std::getenv("PORT")) port = std::stoi(p);
+        const std::string db_conn_str  = require_env("DATABASE_URL");
+        const std::string app_base_url = env_or("APP_BASE_URL", "http://localhost:5173");
+        const int         port         = std::stoi(env_or("PORT", "8080"));
+
+        DbPool pool(db_conn_str, 8);
+        if (!pool.ping()) {
+            std::cerr << "Warning: database unreachable at startup; "
+                         "requests needing it will fail until it recovers.\n";
+        }
+
+        BsApp app;
+
+        app.get_middleware<crow::CORSHandler>()
+            .global()
+            .headers("Content-Type", "Authorization", "Cookie")
+            .methods(crow::HTTPMethod::GET, crow::HTTPMethod::POST,
+                     crow::HTTPMethod::PUT, crow::HTTPMethod::DELETE,
+                     crow::HTTPMethod::OPTIONS)
+            .origin(app_base_url);
+
+        register_auth_routes(app, pool);
+        // register_split_routes(app, pool);
+        // register_bill_routes(app, pool);
+        // register_payment_routes(app, pool);
+        // register_export_routes(app, pool);
+        // register_currency_routes(app, pool);
+
+        CROW_ROUTE(app, "/api/health")([] {
+            crow::response res(200, R"({"status":"ok"})");
+            res.add_header("Content-Type", "application/json");
+            return res;
+        });
+
+        std::cout << "BillSplitter backend listening on port " << port << "\n";
+        app.port(static_cast<uint16_t>(port)).multithreaded().run();
+        return 0;
     } catch (const std::exception& e) {
-        std::cerr << "Config error: " << e.what() << "\n";
+        std::cerr << "Fatal: " << e.what() << "\n";
         return 1;
     }
-
-    DbPool pool(db_conn_str, 8);
-
-    crow::SimpleApp app;
-
-    app.get_middleware<crow::CORSHandler>()
-        .global()
-        .headers("Content-Type, Authorization, Cookie")
-        .methods("GET, POST, PUT, DELETE, OPTIONS")
-        .origin(app_base_url);
-
-    register_auth_routes(app, pool);
-    // register_split_routes(app, pool);
-    // register_bill_routes(app, pool);
-    // register_payment_routes(app, pool);
-    // register_export_routes(app, pool);
-    // register_currency_routes(app, pool);
-
-    CROW_ROUTE(app, "/api/health")([] {
-        return crow::response(200, R"({"status":"ok"})");
-    });
-
-    std::cout << "BillSplitter backend starting on port " << port << "\n";
-    app.port(port).multithreaded().run();
-    return 0;
 }
