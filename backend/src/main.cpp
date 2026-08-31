@@ -6,8 +6,9 @@
 #include "app.h"
 #include "db/db_pool.h"
 #include "routes/auth_routes.h"
-// Phase 2+ route headers will be #include'd here as they are implemented:
-// #include "routes/split_routes.h"
+#include "routes/member_routes.h"
+#include "routes/split_routes.h"
+// Phase 3+ route headers will be #include'd here as they are implemented:
 // #include "routes/bill_routes.h"
 // #include "routes/payment_routes.h"
 // #include "routes/export_routes.h"
@@ -50,7 +51,8 @@ int main() {
             .origin(app_base_url);
 
         register_auth_routes(app, pool);
-        // register_split_routes(app, pool);
+        register_split_routes(app, pool);
+        register_member_routes(app, pool);
         // register_bill_routes(app, pool);
         // register_payment_routes(app, pool);
         // register_export_routes(app, pool);

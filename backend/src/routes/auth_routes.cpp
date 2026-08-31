@@ -53,8 +53,11 @@ void register_auth_routes(BsApp& app, DbPool& pool) {
             res.code = 400;
             res.body = json({{"error", e.what()}}).dump();
         } catch (const std::exception& e) {
+            // Internal exception text can carry SQL and schema details, so it is
+            // logged server-side and never returned to the client.
+            CROW_LOG_ERROR << "auth_routes: " << e.what();
             res.code = 500;
-            res.body = json({{"error", e.what()}}).dump();
+            res.body = R"({"error":"Internal server error"})";
         }
         return res;
     });
@@ -92,8 +95,11 @@ void register_auth_routes(BsApp& app, DbPool& pool) {
             }).dump();
             res.add_header("Set-Cookie", "session=" + token + SESSION_COOKIE_OPTS);
         } catch (const std::exception& e) {
+            // Internal exception text can carry SQL and schema details, so it is
+            // logged server-side and never returned to the client.
+            CROW_LOG_ERROR << "auth_routes: " << e.what();
             res.code = 500;
-            res.body = json({{"error", e.what()}}).dump();
+            res.body = R"({"error":"Internal server error"})";
         }
         return res;
     });
@@ -112,8 +118,10 @@ void register_auth_routes(BsApp& app, DbPool& pool) {
                 "session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0");
             return res;
         } catch (const std::exception& e) {
-            return crow::response(500,
-                json({{"error", e.what()}}).dump());
+            CROW_LOG_ERROR << "auth_routes: " << e.what();
+            crow::response res(500, R"({"error":"Internal server error"})");
+            res.add_header("Content-Type", "application/json");
+            return res;
         }
     });
 

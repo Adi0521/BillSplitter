@@ -447,9 +447,12 @@ cd frontend && npm install && npm run dev
 - [x] Login/Register page (email + password)
 
 ### Phase 2 — Splits & Members
-- [ ] Full CRUD for splits
-- [ ] Member add/remove/invite
-- [ ] SplitsView.vue + SplitDetailView.vue
+- [x] Full CRUD for splits
+- [x] Member add/remove
+- [ ] Member invite — deferred: sends email, and no mail service is configured
+      (Phase 1 dropped SendGrid when auth moved to passwords). Member emails are
+      stored, nothing is sent. Revisit alongside Phase 6's "notify all".
+- [x] SplitsView.vue + SplitDetailView.vue + NewSplitView.vue
 
 ### Phase 3 — Bills & Items
 - [ ] Manual bill creation + item CRUD

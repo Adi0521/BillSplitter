@@ -11,11 +11,17 @@ See [plan.md](plan.md) for the full design and phase breakdown.
 
 ## Status
 
-Phase 1 (auth foundation) is complete and verified end to end: register, login,
-logout, session cookie, `Authorization: Bearer`, and `GET /api/auth/me`.
+Phases 1 and 2 are complete and verified end to end.
 
-Phases 2–8 — splits, members, bills, the allocation engine, receipt parsing,
-summaries, payments, sharing, export, and currency — are not yet implemented.
+- **Phase 1** — register, login, logout, session cookie, `Authorization: Bearer`,
+  and `GET /api/auth/me`.
+- **Phase 2** — splits CRUD, member add/remove, and the three views for them.
+  Member *invite* is deferred: it sends email and no mail service is configured.
+
+Phases 3–8 — bills, the allocation engine, receipt parsing, summaries, payments,
+sharing, export, and currency — are not yet implemented.
+
+The full request/response contract lives in [docs/api.md](docs/api.md).
 
 ## Prerequisites
 
@@ -94,6 +100,14 @@ Implemented today:
 | POST | `/api/auth/login` | Log in; sets session cookie |
 | POST | `/api/auth/logout` | Invalidate session |
 | GET | `/api/auth/me` | Current user |
+| GET | `/api/splits` | List splits (`?archived=true` to include archived) |
+| POST | `/api/splits` | Create a split; adds the owner as first member |
+| GET | `/api/splits/:id` | Split detail with embedded members |
+| PUT | `/api/splits/:id` | Partial update |
+| DELETE | `/api/splits/:id` | Archive (does not delete) |
+| GET | `/api/splits/:id/members` | List members |
+| POST | `/api/splits/:id/members` | Add a member |
+| DELETE | `/api/splits/:id/members/:mid` | Remove a member |
 
 Sessions are opaque 32-byte tokens in the `sessions` table, sent as an HttpOnly
 `session` cookie or an `Authorization: Bearer` header. Passwords are PBKDF2-
