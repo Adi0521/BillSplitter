@@ -18,7 +18,11 @@ Phases 1 and 2 are complete and verified end to end.
 - **Phase 2** — splits CRUD, member add/remove, and the three views for them.
   Member *invite* is deferred: it sends email and no mail service is configured.
 
-Phases 3–8 — bills, the allocation engine, receipt parsing, summaries, payments,
+- **Phase 3** — bills CRUD, line-item CRUD, and the views for them. Money is
+  handled as strings end to end and every total is computed server-side; see
+  the "Money representation" section of the contract before touching an amount.
+
+Phases 4–8 — the allocation engine, receipt parsing, summaries, payments,
 sharing, export, and currency — are not yet implemented.
 
 The full request/response contract lives in [docs/api.md](docs/api.md).
@@ -108,6 +112,15 @@ Implemented today:
 | GET | `/api/splits/:id/members` | List members |
 | POST | `/api/splits/:id/members` | Add a member |
 | DELETE | `/api/splits/:id/members/:mid` | Remove a member |
+| GET | `/api/splits/:id/bills` | List bills |
+| POST | `/api/splits/:id/bills` | Create a bill |
+| GET | `/api/splits/:id/bills/:bid` | Bill detail with embedded items |
+| PUT | `/api/splits/:id/bills/:bid` | Partial update |
+| DELETE | `/api/splits/:id/bills/:bid` | Delete a bill (items cascade) |
+| GET | `/api/bills/:bid/items` | List line items |
+| POST | `/api/bills/:bid/items` | Add a line item |
+| PUT | `/api/bills/:bid/items/:iid` | Update a line item |
+| DELETE | `/api/bills/:bid/items/:iid` | Delete a line item |
 
 Sessions are opaque 32-byte tokens in the `sessions` table, sent as an HttpOnly
 `session` cookie or an `Authorization: Bearer` header. Passwords are PBKDF2-

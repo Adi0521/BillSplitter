@@ -229,13 +229,136 @@
           </form>
         </section>
 
-        <!-- Bills are Phase 3. Deliberately no link and no fabricated data. -->
-        <section class="card mt-4 border-dashed">
-          <h2 class="text-lg font-semibold text-gray-400">Bills</h2>
-          <p class="mt-1 text-sm text-gray-500">
-            Not yet implemented. Once bills land you’ll add them here and see who
-            owes what across this split.
+        <!-- Bills. Loads separately from the split so a bills failure leaves
+             the header and members above it intact. -->
+        <section class="card mt-4">
+          <div class="flex items-baseline justify-between gap-4">
+            <h2 class="text-lg font-semibold">Bills</h2>
+            <span v-if="!billsLoading && !billsError && bills.length" class="text-xs text-gray-500">
+              {{ billLabel(bills.length) }}
+            </span>
+          </div>
+
+          <!-- A failed delete shouldn’t take the list with it. -->
+          <p
+            v-if="billActionError"
+            class="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+          >
+            {{ billActionError }}
           </p>
+
+          <!-- 1. Loading -->
+          <div v-if="billsLoading" class="mt-4 space-y-3" aria-busy="true">
+            <p class="sr-only">Loading bills…</p>
+            <div v-for="n in 2" :key="n" class="animate-pulse py-3">
+              <div class="h-4 w-1/3 rounded bg-gray-200"></div>
+              <div class="mt-3 h-3 w-1/2 rounded bg-gray-100"></div>
+            </div>
+          </div>
+
+          <!-- 2. Error — scoped to this section -->
+          <div v-else-if="billsError" class="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3">
+            <p class="text-sm font-medium text-red-800">Couldn’t load bills</p>
+            <p class="mt-1 text-sm text-red-700">{{ billsError }}</p>
+            <button type="button" class="btn-secondary mt-3" @click="loadBills">Try again</button>
+          </div>
+
+          <!-- 3. Empty -->
+          <div v-else-if="bills.length === 0" class="mt-2 text-center py-8">
+            <p class="text-sm text-gray-500 max-w-sm mx-auto">
+              No bills here yet. Add the receipt from the last shop or meal and
+              this split starts keeping track of it.
+            </p>
+            <router-link
+              :to="{ name: 'NewBill', params: { id: split.id } }"
+              class="btn-primary inline-block mt-6"
+            >
+              Add the first bill
+            </router-link>
+          </div>
+
+          <!-- 4. Loaded -->
+          <template v-else>
+            <ul class="mt-4 divide-y divide-gray-100">
+              <li v-for="bill in bills" :key="bill.id" class="py-3 first:pt-0">
+                <div class="flex items-start justify-between gap-4">
+                  <div class="min-w-0">
+                    <router-link
+                      :to="{ name: 'BillDetail', params: { splitId: split.id, billId: bill.id } }"
+                      class="block truncate text-sm font-medium text-gray-900 hover:text-primary-600"
+                    >
+                      {{ bill.store_name }}
+                    </router-link>
+                    <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-500">
+                      <template v-if="formatDay(bill.date)">
+                        <span>{{ formatDay(bill.date) }}</span>
+                        <span aria-hidden="true">·</span>
+                      </template>
+                      <span>{{ bill.currency }}</span>
+                      <span aria-hidden="true">·</span>
+                      <span>{{ itemLabel(bill.item_count) }}</span>
+                    </div>
+                  </div>
+
+                  <div class="flex shrink-0 items-center gap-3">
+                    <!-- The server computes this total; it is only reformatted
+                         to 2dp here, never recomputed from the items. -->
+                    <span class="text-sm font-medium tabular-nums text-gray-900">
+                      {{ formatMoney(bill.total) }}
+                    </span>
+                    <button
+                      v-if="confirmingBillId !== bill.id"
+                      type="button"
+                      class="btn-secondary text-xs px-3 py-1.5"
+                      :disabled="deletingBillId !== null"
+                      @click="confirmDeleteBill(bill)"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Confirmed inline, like member removal, so the bill stays on
+                     screen while you decide. -->
+                <div
+                  v-if="confirmingBillId === bill.id"
+                  class="mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2"
+                >
+                  <p class="text-xs text-red-700">
+                    Delete this bill? Unlike a split, a bill isn’t archived — it and
+                    its {{ itemLabel(bill.item_count) }} are gone for good.
+                  </p>
+                  <div class="mt-2 flex gap-2">
+                    <button
+                      type="button"
+                      class="btn-secondary text-xs px-3 py-1.5 border-red-300 text-red-700 hover:bg-red-100"
+                      :disabled="deletingBillId === bill.id"
+                      @click="deleteBill(bill)"
+                    >
+                      {{ deletingBillId === bill.id ? 'Deleting…' : 'Yes, delete' }}
+                    </button>
+                    <button
+                      type="button"
+                      class="btn-secondary text-xs px-3 py-1.5"
+                      :disabled="deletingBillId === bill.id"
+                      @click="confirmingBillId = null"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </li>
+            </ul>
+
+            <div class="mt-6 border-t border-gray-100 pt-4">
+              <router-link
+                :to="{ name: 'NewBill', params: { id: split.id } }"
+                class="btn-primary inline-block"
+              >
+                Add bill
+              </router-link>
+            </div>
+          </template>
         </section>
       </template>
     </div>
@@ -248,16 +371,21 @@ import { useRoute } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import AppLayout from '@/components/AppLayout.vue'
 import { useSplitsStore } from '@/stores/splits'
-import { typeLabel, memberLabel, formatDate } from '@/lib/format'
+import { useBillsStore } from '@/stores/bills'
+import { typeLabel, memberLabel, itemLabel, billLabel, formatDate, formatDay, formatMoney } from '@/lib/format'
 import { useAuthStore } from '@/stores/auth'
 
 const route = useRoute()
 const store = useSplitsStore()
+const billsStore = useBillsStore()
 const auth  = useAuthStore()
 
 // `current` is the SplitDetail; `members` is kept in sync by the store's
 // add/remove actions, so the list never needs a refetch after a mutation.
 const { current: split, members } = storeToRefs(store)
+// Bills live in their own store and are kept in sync by its delete action, so
+// removing one doesn’t need a refetch.
+const { bills } = storeToRefs(billsStore)
 
 const loading  = ref(true)
 const error    = ref('')
@@ -281,6 +409,14 @@ const confirmingId = ref(null)
 const removingId   = ref(null)
 const memberError  = ref('')
 
+// Bills — their own loading/error state so a bills failure never blanks out
+// the split header or the members list.
+const billsLoading     = ref(true)
+const billsError       = ref('')
+const billActionError  = ref('')
+const confirmingBillId = ref(null)
+const deletingBillId   = ref(null)
+
 onMounted(load)
 // The route is reused when navigating from one split to another, so the id has
 // to be watched rather than only read once on mount.
@@ -293,8 +429,14 @@ async function load() {
   cancelRename()
   confirmingId.value = null
   memberError.value  = ''
+  // Held true so the previous split’s bills can’t flash in the new one.
+  billsLoading.value = true
+  resetBillState()
   try {
     await store.fetchSplit(route.params.id)
+    // Not awaited: the header and members render as soon as the split lands,
+    // and the bills section fills in under its own loading state.
+    loadBills()
   } catch (e) {
     // The store already normalized this into a user-facing message; the status
     // is what tells 404 apart from a real failure.
@@ -302,6 +444,46 @@ async function load() {
     else error.value = e.message
   } finally {
     loading.value = false
+  }
+}
+
+function resetBillState() {
+  billsError.value       = ''
+  billActionError.value  = ''
+  confirmingBillId.value = null
+  deletingBillId.value   = null
+}
+
+// Never throws: a bills failure is reported inside the bills section only.
+async function loadBills() {
+  billsLoading.value = true
+  resetBillState()
+  try {
+    await billsStore.fetchBills(route.params.id)
+  } catch (e) {
+    billsError.value = e.message
+  } finally {
+    billsLoading.value = false
+  }
+}
+
+function confirmDeleteBill(bill) {
+  billActionError.value  = ''
+  confirmingBillId.value = bill.id
+}
+
+async function deleteBill(bill) {
+  if (deletingBillId.value) return
+  deletingBillId.value  = bill.id
+  billActionError.value = ''
+  try {
+    // The store drops the row from `bills` itself.
+    await billsStore.deleteBill(split.value.id, bill.id)
+    confirmingBillId.value = null
+  } catch (e) {
+    billActionError.value = e.message
+  } finally {
+    deletingBillId.value = null
   }
 }
 

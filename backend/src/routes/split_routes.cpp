@@ -20,14 +20,6 @@ crow::response json_error(int code, const std::string& message) {
     return res;
 }
 
-// require_auth() fills the 401 into the response it is handed AND calls
-// res.end() on it. Crow's response move-assignment copies that "completed"
-// flag, which makes Crow skip its own end() and leaves the connection hanging,
-// so handlers return this fresh 401 instead of the object require_auth touched.
-crow::response unauthorized() {
-    return json_error(401, "Unauthorized");
-}
-
 // ── Input helpers ────────────────────────────────────────────────────────────
 
 std::string trim(const std::string& s) {

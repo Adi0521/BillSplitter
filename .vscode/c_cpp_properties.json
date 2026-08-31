@@ -2,13 +2,31 @@
   "configurations": [
     {
       "name": "Mac",
+
+      // Preferred source of truth: the compilation database CMake generates
+      // (CMAKE_EXPORT_COMPILE_COMMANDS is ON in backend/CMakeLists.txt). It
+      // carries the real include paths and flags for every translation unit,
+      // including the FetchContent dependencies under backend/build/_deps
+      // where Crow and nlohmann/json live. Run a build once so it exists:
+      //   cd backend && cmake -B build && cmake --build build -j8
+      "compileCommands": "${workspaceFolder}/backend/build/compile_commands.json",
+
+      // Fallback for files the build does not compile — headers opened on
+      // their own, and the pre-rewrite splititems.cpp at the repo root, which
+      // is not part of the CMake target. Ignored for files found above.
       "includePath": [
-        "${workspaceFolder}/**",
-        "/opt/homebrew/include"
+        "${workspaceFolder}/backend/include",
+        "${workspaceFolder}/backend/build/_deps/crow-src/include",
+        "${workspaceFolder}/backend/build/_deps/nlohmann_json-src/include",
+        "/opt/homebrew/include",
+        "/opt/homebrew/opt/openssl@3/include",
+        "/opt/homebrew/opt/libpq/include"
       ],
-      "compilerPath": "/usr/bin/clang",
+
+      "compilerPath": "/usr/bin/clang++",
       "cStandard": "c17",
-      "cppStandard": "c++17"
+      "cppStandard": "c++17",
+      "intelliSenseMode": "macos-clang-arm64"
     }
   ],
   "version": 4

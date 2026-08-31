@@ -45,16 +45,6 @@ bool is_uuid(const std::string& s) {
 
 // Resolves the session user, or nullopt when the request is unauthenticated.
 //
-// NOT auth/middleware.h's require_auth(): that helper calls res.end() on the
-// 401 it builds, and Crow's `res = response(handler(...)); res.end();` move-
-// assigns completed_ across, so the framework's own end() is skipped and the
-// connection never completes — an unauthenticated request hangs instead of
-// getting its 401. GET /api/auth/me sidesteps this the same way. Fixing
-// require_auth means editing a shared file this module does not own.
-std::optional<User> current_user(const crow::request& req, DbPool& pool) {
-    return auth::get_session_user(pool, extract_session_token(req));
-}
-
 crow::response json_error(int code, const std::string& message) {
     crow::response res(code, json({{"error", message}}).dump());
     res.add_header("Content-Type", "application/json");

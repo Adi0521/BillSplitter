@@ -116,7 +116,144 @@ empty body is a 400, not a silent no-op.
 
 ---
 
+## Phase 3 — Bills
+
+### Money representation
+
+Every monetary value crosses the wire as a **string**, never a JSON number:
+`"12.5000"`, not `12.5`. Postgres stores `NUMERIC(12,4)`; JSON numbers are IEEE
+doubles, and `0.1 + 0.2` is the canonical reason not to let a float decide what
+someone owes.
+
+Rules that follow from this, and that both sides must honour:
+
+- The client parses these strings **for display only**.
+- **Any total shown to a user comes from the server.** The client never sums
+  line items, tax and tip itself and renders the result. If a total is needed,
+  the server computes it and sends it.
+- Amounts are sent by the client as strings too. `"12.50"` and `"12.5"` are both
+  accepted; the server normalizes to 4 decimal places.
+- Negative values are rejected everywhere in Phase 3. Discounts are a later
+  feature and will need their own design.
+- `""` is **rejected** for an amount but **accepted** for `currency` and
+  `payer_member_id`. That asymmetry is deliberate: those two fields have a
+  meaningful "unset" (inherit the split's currency; nobody fronted the money),
+  which is exactly what an unselected `<select>` submits. An empty *amount* has
+  no such meaning — silently reading it as zero would turn a cleared field or a
+  typo into a real number on someone's bill. Clients should send `"0"`.
+
+### Derived fields
+
+`subtotal` is **derived on every read**, never stored: it is always
+`SUM(price * quantity)` over the bill's items, computed by the same query that
+returns the bill. A client that sends `subtotal` gets a 400.
+
+There is deliberately no `bills.subtotal` column — it was dropped in
+`migrations/003_drop_stored_bill_subtotal.sql`. A stored copy can only ever
+agree with the items or silently disagree with them, and a disagreement would
+make Phase 4's proportional tax/tip split wrong in a way that surfaces as a few
+unexplained cents in someone's share. Deriving on read makes the invariant
+structural instead of something every writer has to remember — which matters
+most in Phase 5, where receipt parsing bulk-inserts items. `tax`, `tip` and `fees` are user-entered; `total` is
+`subtotal + tax + tip + fees`, computed by the server.
+
+`price` is the **unit** price. A line's contribution is `price * quantity`.
+
+```jsonc
+// Bill
+{
+  "id":              "uuid",
+  "split_id":        "uuid",
+  "store_name":      "Safeway",
+  "date":            "2026-08-30",     // ISO date, no time
+  "currency":        "USD",
+  "subtotal":        "42.5000",        // derived, read-only
+  "tax":             "3.8300",
+  "tip":             "0.0000",
+  "fees":            "0.0000",
+  "total":           "46.3300",        // derived, read-only
+  "payer_member_id": null,             // uuid of the member who fronted the money
+  "item_count":      3,                // derived, on list and detail
+  "created_at":      "2026-08-30 23:46:44.364639+00"
+}
+
+// BillItem
+{
+  "id":       "uuid",
+  "bill_id":  "uuid",
+  "name":     "Olive oil",
+  "price":    "12.5000",   // unit price
+  "quantity": 2,
+  "currency": "USD",
+  "line_total": "25.0000"  // derived: price * quantity
+}
+```
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/splits/:id/bills` | — | 200 `[Bill]` |
+| POST | `/api/splits/:id/bills` | `{store_name, date, currency?, tax?, tip?, fees?, payer_member_id?}` | 201 `Bill` |
+| GET | `/api/splits/:id/bills/:bid` | — | 200 `BillDetail` |
+| PUT | `/api/splits/:id/bills/:bid` | any subset of the POST fields | 200 `Bill` |
+| DELETE | `/api/splits/:id/bills/:bid` | — | 200 `{"message":"Deleted"}` |
+
+- `BillDetail` is a `Bill` plus an embedded `"items": [BillItem]` array.
+- Bills list orders by `date DESC, created_at DESC`.
+- `DELETE` really deletes (unlike splits, which archive). Items cascade.
+- `payer_member_id`, when set, **must be a member of that same split** — a member
+  id from another split is a 400, not a 404, because the split itself was found.
+
+### Validation
+
+| Field | Rule |
+|---|---|
+| `store_name` | required, trimmed, 1–200 chars |
+| `date` | required, `YYYY-MM-DD` |
+| `currency` | optional, 3 ASCII letters, uppercased; defaults to the split's currency |
+| `tax`, `tip`, `fees` | optional, ≥ 0, ≤ 99999999.9999; default `"0"`. An empty string is **rejected**, not coerced to zero — see below |
+| `payer_member_id` | optional; a uuid belonging to this split, or `null`/`""` for "no payer" |
+| `subtotal`, `total` | rejected with 400 if supplied — they are derived |
+
+---
+
+## Phase 3 — Bill items
+
+Items hang off `/api/bills/:bid/...`, **not** under `/api/splits/:id/`, matching
+plan.md and keeping the Phase 4 allocation paths from nesting five levels deep.
+
+**This makes authorization the crux of the slice.** The URL contains no split
+and no owner, so ownership must be established by joining
+`bill_items → bills → splits` and checking `splits.owner_id`. Every one of these
+endpoints must do it. A bill id belonging to another user's split must behave
+exactly as if it did not exist.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/bills/:bid/items` | — | 200 `[BillItem]` |
+| POST | `/api/bills/:bid/items` | `{name, price, quantity?, currency?}` | 201 `BillItem` |
+| PUT | `/api/bills/:bid/items/:iid` | any subset of the POST fields | 200 `BillItem` |
+| DELETE | `/api/bills/:bid/items/:iid` | — | 200 `{"message":"Deleted"}` |
+
+- Ordered by insertion: `ORDER BY created_at, id`. The `created_at` column was
+  added in `migrations/002_bill_items_created_at.sql`; `id` is a random UUID and
+  is not an ordering.
+- Every mutation must recompute the parent bill's `subtotal` **in the same
+  transaction**. A response that reports a new item while the bill's subtotal
+  still reflects the old set is a bug.
+- An `:iid` that exists but belongs to a different bill is a 404.
+
+### Validation
+
+| Field | Rule |
+|---|---|
+| `name` | required, trimmed, 1–200 chars |
+| `price` | required, numeric string, ≥ 0, ≤ 99999999.9999, max 4 decimal places |
+| `quantity` | optional int, ≥ 1, ≤ 100000; defaults to 1 |
+| `currency` | optional, 3 ASCII letters; defaults to the bill's currency |
+
+---
+
 ## Not yet implemented
 
-Bills, items, allocations, summary, payments, share, export, and currency
-endpoints are specified in [plan.md](../plan.md) and are not built yet.
+Allocations, summary, payments, share, export, and currency endpoints are
+specified in [plan.md](../plan.md) and are not built yet.

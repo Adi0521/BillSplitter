@@ -455,8 +455,11 @@ cd frontend && npm install && npm run dev
 - [x] SplitsView.vue + SplitDetailView.vue + NewSplitView.vue
 
 ### Phase 3 — Bills & Items
-- [ ] Manual bill creation + item CRUD
-- [ ] BillView.vue with item list
+- [x] Manual bill creation + item CRUD
+- [x] BillView.vue with item list
+- [x] Bills section on SplitDetailView.vue + NewBillView.vue
+- Note: `bills.subtotal` is derived on read, not stored — the column was dropped
+  in `migrations/003_drop_stored_bill_subtotal.sql`. See docs/api.md.
 
 ### Phase 4 — Allocation Engine
 - [ ] `ItemAllocator.vue` — member checkboxes, ratio/amount toggle, even split button
