@@ -253,7 +253,201 @@ exactly as if it did not exist.
 
 ---
 
+## Phase 4 — Allocations
+
+Who owes what for each line item. This is the part of the system where a
+rounding decision made carelessly becomes a few cents that nobody can account
+for, so the rules below are exact and the server is the only thing allowed to
+compute a share.
+
+### What an allocation divides
+
+An allocation splits a line's **`line_total`** (`price * quantity`), not the
+unit `price`. Two people sharing a $12.50 item bought twice are splitting
+$25.00.
+
+### Modes
+
+Each allocation row carries `allocation_mode`, and **every row for one item must
+use the same mode** — a mixed set is a 400. The mode is effectively a property
+of the item; it lives on the row because that is how the table was built.
+
+| Mode | Field | Meaning |
+|---|---|---|
+| `ratio` | `ratio` | percent of the line, e.g. `"33.3333"` |
+| `amount` | `amount` | a fixed sum, e.g. `"5.0000"` |
+
+### The rounding rule — read this before writing any arithmetic
+
+A member's share in ratio mode is `round(line_total * ratio / 100, 4)`,
+**computed by Postgres in NUMERIC**, never in C++ `double` or JavaScript.
+
+Rounded shares need not sum to `line_total`, and the server does not force them
+to. Three people splitting $10.00 evenly by ratio each get `"3.3333"`, totalling
+`"9.9999"`, and the remaining `"0.0001"` is reported as `unallocated`. It is
+**not** silently handed to whoever sorts first. Under-allocation is a legitimate
+state that the UI surfaces; a hidden cent is a bug someone finds three months
+later.
+
+### Over-allocation is blocked, under-allocation is allowed
+
+- Ratio mode: `SUM(ratio) <= 100.0000`. Above that → 400.
+- Amount mode: `SUM(amount) <= line_total`. Above that → 400.
+- Below either bound is fine; the difference comes back as `unallocated`.
+
+```jsonc
+// Allocation
+{
+  "id":              "uuid",
+  "bill_item_id":    "uuid",
+  "member_id":       "uuid",
+  "member_name":     "Alice",        // joined, so the UI never shows a bare uuid
+  "allocation_mode": "ratio",
+  "ratio":           "33.3333",      // string; null in amount mode
+  "amount":          null,           // string in amount mode; null in ratio mode
+  "share":           "3.3333"        // derived: what this member actually owes
+}
+
+// AllocationSet — what GET and PUT both return
+{
+  "bill_item_id": "uuid",
+  "line_total":   "10.0000",
+  "mode":         "ratio",           // null when there are no allocations
+  "allocated":    "9.9999",          // SUM(share)
+  "unallocated":  "0.0001",          // line_total - allocated, never negative
+  "allocations":  [ /* Allocation */ ]
+}
+```
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/bills/:bid/items/:iid/allocations` | — | 200 `AllocationSet` |
+| PUT | `/api/bills/:bid/items/:iid/allocations` | `{mode, allocations:[{member_id, ratio?\|amount?}]}` | 200 `AllocationSet` |
+| POST | `/api/bills/:bid/items/:iid/even-split` | `{member_ids:[uuid]}` | 200 `AllocationSet` |
+
+- **PUT is a full replace**, in one transaction: the item's existing rows are
+  deleted and the supplied set inserted. Sending `{"mode":"ratio","allocations":[]}`
+  clears the item. A partial update would make "remove Bob" indistinguishable
+  from "leave Bob alone".
+- Every `member_id` must belong to **the same split as the bill**. One that does
+  not is a 400 (the item was found; the body is wrong). Duplicated `member_id`
+  in one request is a 400.
+- Ownership, as everywhere: the bill is reached by joining
+  `bill_items → bills → splits` and checking `splits.owner_id`. Another user's
+  item is a 404.
+
+### Even split
+
+`POST .../even-split` with the members to include. It produces **`amount`** mode,
+with each share floored to **2 decimal places** and the remainder left
+unallocated:
+
+```
+$10.00 across 3 members → 3.33, 3.33, 3.33, unallocated 0.01
+```
+
+Floored to cents rather than to the stored 4 decimal places because an even
+split exists to produce a number someone can actually pay. A 4-decimal floor
+would leave `"3.3333"` each and a `"0.0001"` remainder that displays as `0.00` —
+technically precise, and useless. Manually entered amounts may still carry 4
+decimals; this rule is specific to the convenience action.
+
+An empty `member_ids` is a 400. A member id not in the split is a 400. A line
+whose share floors to zero (e.g. `$0.01` across 3 members) is a 400 — writing
+`0.00` rows would contradict the rule that zero allocations are rejected.
+
+### Validation
+
+| Field | Rule |
+|---|---|
+| `mode` | required, `ratio` \| `amount` |
+| `ratio` | required in ratio mode, `> 0`, `<= 100`, max 4 decimals |
+| `amount` | required in amount mode, `> 0`, max 4 decimals |
+| `member_id` | required, uuid, a member of the bill's split, no duplicates |
+
+A zero or negative share is rejected: "allocate nothing to Bob" is expressed by
+leaving Bob out, and having two ways to say it invites them to disagree.
+
+---
+
+## Phase 4 — Per-bill shares
+
+What each member owes on one bill, including their proportional part of tax,
+tip and fees.
+
+| Method | Path | Response |
+|---|---|---|
+| GET | `/api/splits/:id/bills/:bid/shares` | 200 `BillShares` |
+
+```jsonc
+// BillShares
+{
+  "bill_id":   "uuid",
+  "currency":  "USD",
+  "subtotal":  "61.4900",
+  "tax":       "3.8300",
+  "tip":       "0.0000",
+  "fees":      "0.0000",
+  "total":     "65.3200",
+  "allocated_subtotal": "51.4900",   // SUM of every allocated share
+  "unallocated_subtotal": "10.0000", // items nobody has been assigned
+  "payer_member_id": null,
+  "members": [
+    {
+      "member_id": "uuid",
+      "name":      "Alice",
+      "items":     "25.0000",   // their share of line items
+      "tax":       "1.5580",    // proportional
+      "tip":       "0.0000",
+      "fees":      "0.0000",
+      "total":     "26.5580",
+      "owes_payer": "26.5580"   // 0 for the payer; equals total when a payer is set
+    }
+  ],
+  "unallocated": {              // the part of the bill nobody is on the hook for
+    "items": "10.0000", "tax": "0.6230", "tip": "0.0000", "fees": "0.0000",
+    "total": "10.6230"
+  }
+}
+```
+
+### Proportional tax, tip and fees
+
+A member's share of each is `their_items / subtotal * amount`, rounded to 4
+decimals in NUMERIC.
+
+The denominator is the bill's **full** `subtotal`, not the allocated portion.
+This matters: if only half the items are assigned to anybody, only half the tax
+is distributed, and the rest lands in `unallocated`. Dividing by the allocated
+subtotal instead would silently make two people cover tax on a third person's
+unassigned lunch.
+
+`unallocated.tax` (and tip, fees) is the **proportional share of the unassigned
+items**, computed the same way a member's is — not the leftover
+`tax - SUM(members.tax)`. The leftover definition would make the columns tie
+exactly and always, which would hide the rounding residual described above.
+
+**When `subtotal` is `"0.0000"`, every proportional share is `"0.0000"` and the
+whole of tax/tip/fees is `unallocated`.** This is the one place the symmetry
+above is deliberately broken: proportional arithmetic on a zero subtotal would
+put tax in no bucket at all, so the unallocated fallback is the full amount
+while each member's is zero. There is no meaningful proportion of
+nothing, and this is the division-by-zero that must not reach Postgres.
+
+Because of rounding and under-allocation, `SUM(members[].total) + unallocated.total`
+equals `total` only up to the residual the rounding rule already describes. The
+response reports what is true rather than forcing the columns to tie.
+
+### Multi-currency
+
+Deferred to Phase 7. Every amount in this response is in the bill's own
+`currency`; there is no conversion, and a split whose bills use different
+currencies will produce shares that must not be added together. The FX fetcher
+and normalization land with the rest of Phase 7.
+
+---
+
 ## Not yet implemented
 
-Allocations, summary, payments, share, export, and currency endpoints are
-specified in [plan.md](../plan.md) and are not built yet.
+The split-wide summary, payments, share links, export, and currency endpoints
+are specified in [plan.md](../plan.md) and are not built yet.

@@ -22,8 +22,14 @@ Phases 1 and 2 are complete and verified end to end.
   handled as strings end to end and every total is computed server-side; see
   the "Money representation" section of the contract before touching an amount.
 
-Phases 4–8 — the allocation engine, receipt parsing, summaries, payments,
-sharing, export, and currency — are not yet implemented.
+- **Phase 4** — per-item allocations (ratio or fixed amount), even split, and a
+  per-bill "who owes what" breakdown with proportional tax/tip/fees. Read the
+  "Phase 4 — Allocations" section of the contract before changing any of this
+  arithmetic: over-allocation is blocked, under-allocation is legitimate, and
+  the rounding remainder is reported rather than absorbed into someone's share.
+
+Phases 5–8 — receipt parsing, the split-wide summary, payments, sharing, export,
+and multi-currency — are not yet implemented.
 
 The full request/response contract lives in [docs/api.md](docs/api.md).
 
@@ -121,6 +127,10 @@ Implemented today:
 | POST | `/api/bills/:bid/items` | Add a line item |
 | PUT | `/api/bills/:bid/items/:iid` | Update a line item |
 | DELETE | `/api/bills/:bid/items/:iid` | Delete a line item |
+| GET | `/api/bills/:bid/items/:iid/allocations` | Who is on this line item |
+| PUT | `/api/bills/:bid/items/:iid/allocations` | Replace an item's allocations |
+| POST | `/api/bills/:bid/items/:iid/even-split` | Split a line evenly (floors to cents) |
+| GET | `/api/splits/:id/bills/:bid/shares` | Per-member breakdown for one bill |
 
 Sessions are opaque 32-byte tokens in the `sessions` table, sent as an HttpOnly
 `session` cookie or an `Authorization: Bearer` header. Passwords are PBKDF2-

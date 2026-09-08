@@ -196,6 +196,23 @@
                     >
                       {{ item.currency }}
                     </span>
+                    <!-- Only shown once this item's allocations have been loaded
+                         (i.e. its allocator has been opened at least once). The
+                         authoritative picture is the "Who owes what" panel; this
+                         is a reminder of what you just did, so it is deliberately
+                         absent rather than guessed at for items never opened. -->
+                    <p v-if="allocSet(item)" class="mt-1 text-xs text-gray-500">
+                      <template v-if="allocSet(item).allocations.length">
+                        {{ allocNames(item) }}
+                      </template>
+                      <template v-else>Nobody assigned</template>
+                      <span
+                        v-if="!isZeroAmount(allocSet(item).unallocated)"
+                        class="text-amber-700"
+                      >
+                        · {{ formatMoney(allocSet(item).unallocated) }} unallocated
+                      </span>
+                    </p>
                   </td>
                   <td class="py-3 pl-3 text-right tabular-nums text-gray-600">
                     {{ formatMoney(item.price) }}
@@ -229,6 +246,19 @@
                       </button>
                     </div>
                     <div v-else class="flex justify-end gap-2">
+                      <!-- Hidden with no members: there is nobody to allocate to,
+                           and the panel below explains how to fix that. -->
+                      <button
+                        v-if="members.length > 0"
+                        type="button"
+                        class="btn-secondary text-xs px-3 py-1.5"
+                        :class="allocatingId === item.id ? 'border-primary-500 bg-primary-50 text-primary-700' : ''"
+                        :aria-expanded="allocatingId === item.id"
+                        :disabled="itemBusy"
+                        @click="toggleAllocator(item)"
+                      >
+                        {{ allocatingId === item.id ? 'Done' : 'Allocate' }}
+                      </button>
                       <button
                         type="button"
                         class="btn-secondary text-xs px-3 py-1.5"
@@ -246,6 +276,20 @@
                         Delete
                       </button>
                     </div>
+                  </td>
+                </tr>
+
+                <!-- Allocation editor for one item, expanded under its row. Same
+                     full-width-cell shape as the item editor above; opening it
+                     closes any open editor, so the two never stack. -->
+                <tr v-if="allocatingId === item.id" class="bg-gray-50/70">
+                  <td colspan="5" class="py-3">
+                    <ItemAllocator
+                      :bill-id="billId"
+                      :item="item"
+                      :members="members"
+                      @changed="onAllocationChanged"
+                    />
                   </td>
                 </tr>
               </template>
@@ -430,13 +474,191 @@
           </form>
         </section>
 
-        <!-- Allocations are Phase 4. No link and no invented numbers. -->
-        <section class="card mt-4 border-dashed">
-          <h2 class="text-lg font-semibold text-gray-400">Who owes what</h2>
-          <p class="mt-1 text-sm text-gray-500">
-            Not yet implemented. Splitting these items between members lands in
-            Phase 4.
-          </p>
+        <!-- Who owes what. Every figure in this section — each member's item
+             share, their proportional slice of tax/tip/fees, and the
+             unallocated remainder — is a NUMERIC string the server computed.
+             Nothing here is summed, netted or reconciled in JS: see
+             docs/api.md, "The rounding rule". -->
+        <section class="card mt-4">
+          <div class="flex items-baseline justify-between gap-4">
+            <h2 class="text-lg font-semibold">Who owes what</h2>
+            <button
+              type="button"
+              class="btn-secondary text-xs px-3 py-1.5"
+              :disabled="sharesLoading"
+              @click="loadShares"
+            >
+              {{ sharesLoading ? 'Refreshing…' : 'Refresh' }}
+            </button>
+          </div>
+
+          <!-- Loading. Only replaces the panel on a first load; a refresh keeps
+               the previous figures on screen rather than flashing a skeleton. -->
+          <div v-if="sharesLoading && !shares" class="mt-4 space-y-3 animate-pulse" aria-busy="true">
+            <p class="sr-only">Working out each member’s share…</p>
+            <div class="h-4 w-1/2 rounded bg-gray-100"></div>
+            <div class="h-4 w-2/3 rounded bg-gray-100"></div>
+            <div class="h-4 w-2/5 rounded bg-gray-100"></div>
+          </div>
+
+          <!-- Error, scoped to this panel: the bill, its items and its totals
+               above have already loaded and stay readable. -->
+          <div
+            v-else-if="sharesError"
+            class="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-3"
+          >
+            <p class="text-sm font-medium text-red-800">Couldn’t work out the shares</p>
+            <p class="mt-1 text-sm text-red-700">{{ sharesError }}</p>
+            <button type="button" class="btn-secondary mt-3 text-xs px-3 py-1.5" @click="loadShares">
+              Try again
+            </button>
+          </div>
+
+          <template v-else-if="shares">
+            <!-- No members: nothing can be allocated at all, so say that and
+                 point at the one page where it gets fixed. -->
+            <p
+              v-if="shares.members.length === 0"
+              class="mt-3 rounded-lg bg-gray-50 px-3 py-3 text-sm text-gray-600"
+            >
+              This split has no members yet, so the whole
+              {{ shares.currency }} {{ formatMoney(shares.total) }} is unallocated
+              and there is nobody to bill.
+              <router-link
+                :to="`/splits/${splitId}`"
+                class="font-medium text-primary-600 hover:text-primary-700"
+              >
+                Add members to the split
+              </router-link>
+              first, then allocate each item above.
+            </p>
+
+            <template v-else>
+              <!-- The headline: who settles up with whom. `owes_payer` is the
+                   server's figure, not this member's total minus anything. -->
+              <template v-if="shares.payer_member_id">
+                <p class="mt-1 text-sm text-gray-500">
+                  {{ sharesPayerName }} paid, so everyone else settles up with them.
+                </p>
+                <ul class="mt-3 space-y-1 text-sm">
+                  <li v-for="m in owingMembers" :key="m.member_id" class="text-gray-800">
+                    <span class="font-medium">{{ m.name }}</span> owes
+                    <span class="font-medium">{{ sharesPayerName }}</span>{{ ' ' }}
+                    <span class="tabular-nums">
+                      {{ shares.currency }} {{ formatMoney(m.owes_payer) }}
+                    </span>
+                  </li>
+                  <li v-if="owingMembers.length === 0" class="text-gray-500">
+                    Nobody owes {{ sharesPayerName }} anything yet — no items on this
+                    bill are allocated to anyone else.
+                  </li>
+                </ul>
+              </template>
+              <p v-else class="mt-1 text-sm text-gray-500">
+                No payer is set on this bill, so there is nobody to pay back — these
+                are each member’s plain shares. Set who paid under Totals to turn
+                them into “owes”.
+              </p>
+
+              <p
+                v-if="!isZeroAmount(shares.unallocated.total)"
+                class="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800"
+              >
+                {{ shares.currency }} {{ formatMoney(shares.unallocated.total) }} of
+                this bill is allocated to nobody — including
+                {{ formatMoney(shares.unallocated.items) }} of items. Allocate the
+                remaining items above if that is not deliberate.
+              </p>
+
+              <!-- Seven money columns don't fit a phone; scrolling the table
+                   beats dropping a column someone needs. -->
+              <div class="mt-4 overflow-x-auto">
+                <table class="w-full text-sm">
+                  <thead>
+                    <tr class="border-b border-gray-200 text-left text-xs uppercase tracking-wide text-gray-500">
+                      <th scope="col" class="pb-2 font-medium">Member</th>
+                      <th scope="col" class="pb-2 pl-3 text-right font-medium">Items</th>
+                      <th scope="col" class="pb-2 pl-3 text-right font-medium">Tax</th>
+                      <th scope="col" class="pb-2 pl-3 text-right font-medium">Tip</th>
+                      <th scope="col" class="pb-2 pl-3 text-right font-medium">Fees</th>
+                      <th scope="col" class="pb-2 pl-3 text-right font-medium">Total</th>
+                      <th scope="col" class="pb-2 pl-3 text-right font-medium whitespace-nowrap">
+                        {{ shares.payer_member_id ? `Owes ${sharesPayerName}` : 'Owes payer' }}
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-gray-100">
+                    <!-- Keyed by member_id, never by name: two members of one
+                         split may legitimately share a name. -->
+                    <tr v-for="m in shares.members" :key="m.member_id">
+                      <td class="py-2 pr-3">
+                        <span class="font-medium text-gray-900 break-words">{{ m.name }}</span>
+                        <span
+                          v-if="m.member_id === shares.payer_member_id"
+                          class="ml-2 rounded-full bg-primary-50 px-2 py-0.5 text-xs font-medium text-primary-700"
+                        >
+                          paid
+                        </span>
+                      </td>
+                      <td class="py-2 pl-3 text-right tabular-nums text-gray-600">{{ formatMoney(m.items) }}</td>
+                      <td class="py-2 pl-3 text-right tabular-nums text-gray-600">{{ formatMoney(m.tax) }}</td>
+                      <td class="py-2 pl-3 text-right tabular-nums text-gray-600">{{ formatMoney(m.tip) }}</td>
+                      <td class="py-2 pl-3 text-right tabular-nums text-gray-600">{{ formatMoney(m.fees) }}</td>
+                      <td class="py-2 pl-3 text-right tabular-nums font-medium text-gray-900">{{ formatMoney(m.total) }}</td>
+                      <td class="py-2 pl-3 text-right tabular-nums text-gray-900">
+                        <span v-if="shares.payer_member_id">{{ formatMoney(m.owes_payer) }}</span>
+                        <span v-else class="text-gray-400">—</span>
+                      </td>
+                    </tr>
+
+                    <!-- Unallocated is a row of its own and stays visible even at
+                         zero. Folding it into a member, or hiding it, is exactly
+                         the bug this design exists to prevent: an under-allocated
+                         bill must look under-allocated. -->
+                    <tr :class="isZeroAmount(shares.unallocated.total) ? '' : 'bg-amber-50'">
+                      <td class="py-2 pr-3">
+                        <span
+                          class="font-medium"
+                          :class="isZeroAmount(shares.unallocated.total) ? 'text-gray-500' : 'text-amber-800'"
+                        >
+                          Unallocated
+                        </span>
+                      </td>
+                      <td class="py-2 pl-3 text-right tabular-nums text-gray-600">{{ formatMoney(shares.unallocated.items) }}</td>
+                      <td class="py-2 pl-3 text-right tabular-nums text-gray-600">{{ formatMoney(shares.unallocated.tax) }}</td>
+                      <td class="py-2 pl-3 text-right tabular-nums text-gray-600">{{ formatMoney(shares.unallocated.tip) }}</td>
+                      <td class="py-2 pl-3 text-right tabular-nums text-gray-600">{{ formatMoney(shares.unallocated.fees) }}</td>
+                      <td class="py-2 pl-3 text-right tabular-nums font-medium text-gray-900">{{ formatMoney(shares.unallocated.total) }}</td>
+                      <td class="py-2 pl-3 text-right text-gray-400">—</td>
+                    </tr>
+                  </tbody>
+                  <tfoot>
+                    <tr class="border-t border-gray-200 text-sm">
+                      <td class="pt-2 pr-3 font-semibold text-gray-900">Bill</td>
+                      <td class="pt-2 pl-3 text-right tabular-nums text-gray-600">{{ formatMoney(shares.subtotal) }}</td>
+                      <td class="pt-2 pl-3 text-right tabular-nums text-gray-600">{{ formatMoney(shares.tax) }}</td>
+                      <td class="pt-2 pl-3 text-right tabular-nums text-gray-600">{{ formatMoney(shares.tip) }}</td>
+                      <td class="pt-2 pl-3 text-right tabular-nums text-gray-600">{{ formatMoney(shares.fees) }}</td>
+                      <td class="pt-2 pl-3 text-right tabular-nums font-semibold text-gray-900">{{ formatMoney(shares.total) }}</td>
+                      <td class="pt-2 pl-3 text-right text-gray-400">—</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+
+              <p class="mt-3 text-xs text-gray-500">
+                Tax, tip and fees are split in proportion to each member’s share of
+                the <em>full</em> subtotal, so items nobody is on the hook for keep
+                their slice of them in the unallocated row.
+              </p>
+              <p class="mt-1 text-xs text-gray-400">
+                Every figure is rounded to four decimal places by the server and
+                shown to two, so the rows need not add up to the bill exactly. The
+                residual is reported rather than papered over — nothing on this
+                page is a client-side sum.
+              </p>
+            </template>
+          </template>
         </section>
       </template>
     </div>
@@ -448,18 +670,24 @@ import { ref, reactive, computed, nextTick, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import AppLayout from '@/components/AppLayout.vue'
+import ItemAllocator from '@/components/ItemAllocator.vue'
 import { useBillsStore } from '@/stores/bills'
 import { useSplitsStore } from '@/stores/splits'
+import { useAllocationsStore } from '@/stores/allocations'
 import { formatDay, formatMoney, itemLabel } from '@/lib/format'
 
-const route  = useRoute()
-const bills  = useBillsStore()
-const splits = useSplitsStore()
+const route       = useRoute()
+const bills       = useBillsStore()
+const splits      = useSplitsStore()
+const allocations = useAllocationsStore()
 
 // `current`/`items` are kept in sync by the store's own actions, including the
 // refetch of the server-derived subtotal and total after every item mutation.
 const { current, items } = storeToRefs(bills)
 const { current: split, members } = storeToRefs(splits)
+// `byItem` is filled in by ItemAllocator through the same store; the view only
+// reads it to label a row it has already been opened on.
+const { shares: sharesData, byItem: allocationsByItem } = storeToRefs(allocations)
 
 const splitId = computed(() => route.params.splitId)
 const billId  = computed(() => route.params.billId)
@@ -467,6 +695,11 @@ const billId  = computed(() => route.params.billId)
 // Guards against a flash of the previously-viewed bill while a new one loads:
 // the store's `current` is shared, so only render it once it is *this* bill.
 const bill = computed(() => (current.value?.id === billId.value ? current.value : null))
+
+// Same guard for the shares: the store holds one BillShares at a time, so a
+// stale one from the previously viewed bill must not be rendered against this
+// one's items.
+const shares = computed(() => (sharesData.value?.bill_id === billId.value ? sharesData.value : null))
 
 const loading      = ref(true)
 const error        = ref('')
@@ -490,6 +723,14 @@ const confirmingId = ref(null)
 const deletingId   = ref(null)
 const itemError    = ref('')
 
+// Per-item allocation. One allocator open at a time, mirroring the item editor.
+const allocatingId = ref(null)
+
+// Who owes what. Its own loading/error pair so a failed shares request leaves
+// the bill, its items and its totals on screen.
+const sharesLoading = ref(false)
+const sharesError   = ref('')
+
 // Edit tax / tip / fees / payer
 const editingAmounts = ref(false)
 const amountDraft    = reactive({ tax: '', tip: '', fees: '', payer: '' })
@@ -509,16 +750,32 @@ const payerName = computed(() => {
   return members.value.find(m => m.id === id)?.name ?? 'Unknown member'
 })
 
+// The payer's name for the shares panel. Taken from the shares response first,
+// which joins it in, so the panel still reads properly when the split's members
+// failed to load separately.
+const sharesPayerName = computed(() => {
+  const id = shares.value?.payer_member_id
+  if (!id) return ''
+  return (
+    shares.value.members.find(m => m.member_id === id)?.name ??
+    members.value.find(m => m.id === id)?.name ??
+    'Unknown member'
+  )
+})
+
+// Members with something to settle. Filtering on "is this string zero" is a
+// display decision, not arithmetic — see `isZeroAmount`.
+const owingMembers = computed(() =>
+  (shares.value?.members ?? []).filter(m => !isZeroAmount(m.owes_payer)),
+)
+
 // `date` is a plain calendar date ("2026-08-30"), not a timestamp. Feeding it
 // to Date() bare parses it as UTC midnight, which renders as the day before in
 // any negative-offset timezone; appending a time makes the shared formatter
 // parse it as local midnight instead.
 const billDate = computed(() => formatDay(bill.value?.date))
 
-const itemCountLabel = computed(() => {
-  const n = items.value.length
-  return `${n} ${n === 1 ? 'item' : 'items'}`
-})
+const itemCountLabel = computed(() => itemLabel(items.value.length))
 
 onMounted(load)
 // The route component is reused when moving between bills, so both params have
@@ -535,6 +792,11 @@ async function load() {
   // The bill and the split are independent requests: the members are only
   // needed to put a name on `payer_member_id`, so losing them must not blank
   // out a bill that loaded perfectly well.
+  // Drop the previous bill's allocation sets and shares outright; the guards
+  // above only stop them rendering, they don't stop them lingering.
+  allocations.reset()
+  allocatingId.value = null
+
   const [billResult, splitResult] = await Promise.allSettled([
     bills.fetchBill(splitId.value, billId.value),
     splits.fetchSplit(splitId.value),
@@ -551,6 +813,63 @@ async function load() {
   }
 
   loading.value = false
+
+  // Fired without awaiting: the shares panel renders its own loading state, so
+  // the bill doesn't wait on a second round trip. Pointless if there is no bill.
+  if (billResult.status === 'fulfilled') loadShares()
+}
+
+// ── Who owes what ───────────────────────────────────────────────────────────
+
+// Guards against out-of-order responses: allocating an item fires a refresh
+// while another may still be in flight, and the older reply must not decide
+// what the panel says.
+let sharesRequest = 0
+
+async function loadShares() {
+  const seq = ++sharesRequest
+  sharesLoading.value = true
+  sharesError.value   = ''
+  try {
+    await allocations.fetchShares(splitId.value, billId.value)
+  } catch (e) {
+    if (seq === sharesRequest) sharesError.value = e.message
+  } finally {
+    if (seq === sharesRequest) sharesLoading.value = false
+  }
+}
+
+// Anything that moves money — an allocation, an item, tax/tip/fees, the payer —
+// changes what everyone owes, so the panel is refetched rather than patched.
+function refreshShares() {
+  if (bill.value) loadShares()
+}
+
+function toggleAllocator(item) {
+  cancelEdit()
+  confirmingId.value = null
+  allocatingId.value = allocatingId.value === item.id ? null : item.id
+}
+
+function onAllocationChanged() {
+  refreshShares()
+}
+
+function allocSet(item) {
+  return allocationsByItem.value[item.id] ?? null
+}
+
+function allocNames(item) {
+  return (allocSet(item)?.allocations ?? []).map(a => a.member_name).join(', ')
+}
+
+// True for "0", "0.00", "0.0000" — a string test on purpose. Turning these into
+// Numbers to compare against 0 would be the float round trip the whole money
+// path avoids, and this is only ever used to decide what to show, never what
+// to send.
+function isZeroAmount(raw) {
+  const s = String(raw ?? '').trim()
+  return s === '' || /^-?0*(\.0*)?$/.test(s)
 }
 
 function resetForms() {
@@ -649,6 +968,9 @@ async function submitItem() {
     newItem.name = ''
     newItem.price = ''
     newItem.quantity = ''
+    // A new item is unallocated, and it moves the subtotal every proportional
+    // slice is computed against.
+    refreshShares()
   } catch (e) {
     addError.value = e.message
   } finally {
@@ -657,6 +979,7 @@ async function submitItem() {
 }
 
 function startEdit(item) {
+  allocatingId.value = null
   confirmingId.value = null
   itemError.value = ''
   editError.value = ''
@@ -709,6 +1032,7 @@ async function saveItem(item) {
   try {
     await bills.updateItem(splitId.value, billId.value, item.id, patch)
     cancelEdit()
+    refreshShares()
   } catch (e) {
     editError.value = e.message
   } finally {
@@ -728,6 +1052,8 @@ async function deleteItem(item) {
   try {
     await bills.removeItem(splitId.value, billId.value, item.id)
     confirmingId.value = null
+    if (allocatingId.value === item.id) allocatingId.value = null
+    refreshShares()
   } catch (e) {
     itemError.value = e.message
   } finally {
@@ -784,6 +1110,7 @@ async function saveAmounts() {
   try {
     await bills.updateBill(splitId.value, billId.value, patch)
     cancelAmounts()
+    refreshShares()
   } catch (e) {
     amountError.value = e.message
   } finally {

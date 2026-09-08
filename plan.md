@@ -462,10 +462,13 @@ cd frontend && npm install && npm run dev
   in `migrations/003_drop_stored_bill_subtotal.sql`. See docs/api.md.
 
 ### Phase 4 — Allocation Engine
-- [ ] `ItemAllocator.vue` — member checkboxes, ratio/amount toggle, even split button
-- [ ] Allocation validation (block > 100% / base price, allow under, show remainder)
-- [ ] `PUT /api/bills/:bid/items/:iid/allocations` bulk upsert
-- [ ] `SplitCalculator` service — totals with tax/tip proportional split, FX normalization
+- [x] `ItemAllocator.vue` — member checkboxes, ratio/amount toggle, even split button
+- [x] Allocation validation (block > 100% / base price, allow under, show remainder)
+- [x] `PUT /api/bills/:bid/items/:iid/allocations` bulk upsert
+- [x] Per-bill share breakdown with proportional tax/tip/fees
+      (`GET /api/splits/:id/bills/:bid/shares`)
+- [ ] FX normalization — deferred to Phase 7 with the rest of multi-currency;
+      every amount today is in the bill's own currency
 
 ### Phase 5 — Receipt Parsing
 - [ ] `ReceiptParser` abstract interface + `ClaudeReceiptParser` impl

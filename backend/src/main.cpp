@@ -10,7 +10,9 @@
 #include "routes/split_routes.h"
 #include "routes/bill_routes.h"
 #include "routes/item_routes.h"
-// Phase 4+ route headers will be #include'd here as they are implemented:
+#include "routes/allocation_routes.h"
+#include "routes/share_routes.h"
+// Phase 5+ route headers will be #include'd here as they are implemented:
 // #include "routes/payment_routes.h"
 // #include "routes/export_routes.h"
 // #include "routes/currency_routes.h"
@@ -56,6 +58,8 @@ int main() {
         register_member_routes(app, pool);
         register_bill_routes(app, pool);
         register_item_routes(app, pool);
+        register_allocation_routes(app, pool);
+        register_share_routes(app, pool);
         // register_payment_routes(app, pool);
         // register_export_routes(app, pool);
         // register_currency_routes(app, pool);
