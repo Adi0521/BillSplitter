@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    name: Backend build + API tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: billsplitter
+          POSTGRES_PASSWORD: billsplitter
+          POSTGRES_DB: postgres
+        ports: ['5433:5432']
+        # Without a health check the job races the database and fails
+        # intermittently, which is worse than failing consistently.
+        options: >-
+          --health-cmd "pg_isready -U billsplitter"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake g++ libpqxx-dev libpq-dev libssl-dev libcurl4-openssl-dev \
+            libasio-dev postgresql-client pkg-config
+
+      # Crow and nlohmann/json come from FetchContent; caching the whole build
+      # tree keeps the dependency clone out of every run.
+      - name: Cache CMake build
+        uses: actions/cache@v4
+        with:
+          path: backend/build/_deps
+          key: deps-${{ runner.os }}-${{ hashFiles('backend/CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake -S backend -B backend/build -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build backend/build -j"$(nproc)" 2>&1 | tee build.log
+
+      # Warnings are how the small mistakes in this codebase have surfaced, so
+      # they fail the build rather than scrolling past.
+      - name: Fail on compiler warnings
+        run: |
+          if grep -E "warning:" build.log; then
+            echo "::error::build produced warnings"
+            exit 1
+          fi
+
+      - name: API integration tests
+        env:
+          BILLSPLITTER_ADMIN_URL: postgresql://billsplitter:billsplitter@localhost:5433/postgres
+        run: ./scripts/run-api-tests.sh
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+
+  migrations:
+    name: Migrations apply from zero
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: billsplitter
+          POSTGRES_PASSWORD: billsplitter
+          POSTGRES_DB: billsplitter
+        ports: ['5433:5432']
+        options: >-
+          --health-cmd "pg_isready -U billsplitter"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      # Applying twice proves the ledger actually skips what it has already
+      # run, which is the property that stops a re-run corrupting a database.
+      - name: Apply, then re-apply
+        env:
+          DATABASE_URL: postgresql://billsplitter:billsplitter@localhost:5433/billsplitter
+        run: |
+          ./scripts/migrate.sh
+          ./scripts/migrate.sh | tee second.log
+          grep -q "already up to date" second.log || {
+            echo "::error::migrations re-ran on a second invocation"; exit 1; }

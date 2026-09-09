@@ -403,6 +403,10 @@ Toggle (per item or global): `[ % Ratio ]  [ $ Amount ]`
 
 ## Existing Code — Migration Plan
 
+**Completed.** `splititems.{h,cpp}` were removed once Phases 1-4 superseded
+them entirely; the table below is kept as a record of where each piece went.
+Recover the originals with `git show 88d4f85:splititems.cpp` if ever needed.
+
 | Existing | Action |
 |----------|--------|
 | `splititems.h` — `BillItem`, `Bill` structs | Migrate to `backend/include/models/bill.h` — extend with UUID, currency, etc. |

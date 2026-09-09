@@ -11,9 +11,8 @@
       //   cd backend && cmake -B build && cmake --build build -j8
       "compileCommands": "${workspaceFolder}/backend/build/compile_commands.json",
 
-      // Fallback for files the build does not compile — headers opened on
-      // their own, and the pre-rewrite splititems.cpp at the repo root, which
-      // is not part of the CMake target. Ignored for files found above.
+      // Fallback for files the build does not compile — chiefly headers
+      // opened on their own. Ignored for any file found in the database above.
       "includePath": [
         "${workspaceFolder}/backend/include",
         "${workspaceFolder}/backend/build/_deps/crow-src/include",

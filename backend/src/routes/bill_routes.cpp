@@ -567,9 +567,19 @@ void register_bill_routes(BsApp& app, DbPool& pool) {
                 std::string currency;
                 if (!read_string_field(body, "currency", currency, err))
                     return json_error(400, err);
-                if (!validate_currency(currency, err)) return json_error(400, err);
-                assignments.push_back("currency = $" + std::to_string(n++));
-                params.append(currency);
+                if (trim(currency).empty()) {
+                    // "" means "unset" for currency, the same as it does on
+                    // create and the same as it does for payer_member_id here:
+                    // fall back to the split's currency rather than rejecting.
+                    // An edit form whose currency select is cleared submits ""
+                    // and must not be a 400.
+                    assignments.push_back(
+                        "currency = (SELECT currency FROM splits WHERE id = b.split_id)");
+                } else {
+                    if (!validate_currency(currency, err)) return json_error(400, err);
+                    assignments.push_back("currency = $" + std::to_string(n++));
+                    params.append(currency);
+                }
             }
             for (const char* field : {"tax", "tip", "fees"}) {
                 if (!body.contains(field)) continue;

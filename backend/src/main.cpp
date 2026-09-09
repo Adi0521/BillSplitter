@@ -4,6 +4,7 @@
 #include <string>
 
 #include "app.h"
+#include "auth/session_sweeper.h"
 #include "db/db_pool.h"
 #include "routes/auth_routes.h"
 #include "routes/member_routes.h"
@@ -43,6 +44,11 @@ int main() {
                          "requests needing it will fail until it recovers.\n";
         }
 
+        // Nothing else deletes expired sessions; without this the table grows
+        // for the life of the deployment.
+        SessionSweeper sweeper(pool);
+        sweeper.start();
+
         BsApp app;
 
         app.get_middleware<crow::CORSHandler>()
@@ -63,6 +69,22 @@ int main() {
         // register_payment_routes(app, pool);
         // register_export_routes(app, pool);
         // register_currency_routes(app, pool);
+
+        // Crow answers an unmatched URL with a plain-text "404 Not Found",
+        // which breaks the API's own rule that every failure carries an
+        // {"error": "..."} body. A client parsing responses as JSON would hit
+        // a parse error instead of a message it can show.
+        CROW_CATCHALL_ROUTE(app)([](crow::response& res) {
+            if (res.code == 404) {
+                res.body = R"({"error":"Not found"})";
+            } else if (res.code == 405) {
+                res.body = R"({"error":"Method not allowed"})";
+            } else if (res.body.empty()) {
+                res.body = R"({"error":"Request failed"})";
+            }
+            res.add_header("Content-Type", "application/json");
+            res.end();
+        });
 
         CROW_ROUTE(app, "/api/health")([] {
             crow::response res(200, R"({"status":"ok"})");

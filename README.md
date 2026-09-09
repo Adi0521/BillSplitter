@@ -62,6 +62,25 @@ cd frontend && npm install && npm run dev
 
 Then open http://localhost:5173.
 
+## Tests
+
+```bash
+./scripts/run-api-tests.sh            # the whole suite
+./scripts/run-api-tests.sh test_shares  # one module
+ctest --test-dir backend/build        # same suite, via CTest
+```
+
+242 integration tests drive the real HTTP API against a throwaway
+`billsplitter_test` database, rebuilt and migrated from zero on every run. They
+are deliberately not unit tests: every validation helper lives in an anonymous
+namespace inside its `.cpp`, and the logic worth testing is in NUMERIC
+expressions, join-based authorization and handler validation — none of which a
+linked unit test reaches. Standard library only, so CI needs nothing but Python.
+
+Tests assert the **contract** in [docs/api.md](docs/api.md), not current
+behaviour. A test that fails because the code disagrees with the contract is
+doing its job; fix the code, or change the contract deliberately.
+
 ## Migrations
 
 `scripts/migrate.sh` is the only thing that applies schema, to local and hosted
@@ -95,6 +114,16 @@ Put the Transaction Pooler URI in `backend/.env` as `DATABASE_URL`, then run
 | `DATABASE_URL` | yes | — | PostgreSQL connection string |
 | `APP_BASE_URL` | no | `http://localhost:5173` | Allowed CORS origin |
 | `PORT` | no | `8080` | Backend listen port |
+| `LOGIN_MAX_FAILURES` | no | `10` | Failed sign-ins per email+IP before a 429 |
+| `LOGIN_THROTTLE_WINDOW_SECONDS` | no | `900` | Window those failures are counted over |
+
+Only *failed* sign-ins count toward the throttle and a success clears the
+history, so ordinary use — including a test suite that logs in constantly — is
+never throttled. The counter is in-process, so behind several instances the
+effective limit multiplies by the instance count.
+
+Expired sessions are swept hourly by a background thread; nothing else deletes
+them.
 
 The backend starts even when the database is unreachable and logs a warning;
 `/api/health` still responds, and connections are opened lazily per request.

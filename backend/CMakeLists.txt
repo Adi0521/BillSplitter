@@ -105,3 +105,17 @@ target_link_libraries(billsplitter-backend PRIVATE
 target_compile_options(billsplitter-backend PRIVATE
     -Wall -Wextra -Wno-unused-parameter
 )
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+# The logic worth testing here lives in SQL expressions, join-based
+# authorization and handler validation, none of which a linked unit test can
+# reach: every helper sits in an anonymous namespace inside its .cpp. So the
+# suite drives the real HTTP API against a throwaway database instead, which
+# covers all three at once. `ctest` runs it; so does scripts/run-api-tests.sh.
+enable_testing()
+add_test(
+    NAME api-integration
+    COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/run-api-tests.sh"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
+)
+set_tests_properties(api-integration PROPERTIES TIMEOUT 600)
