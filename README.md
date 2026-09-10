@@ -28,8 +28,13 @@ Phases 1 and 2 are complete and verified end to end.
   arithmetic: over-allocation is blocked, under-allocation is legitimate, and
   the rounding remainder is reported rather than absorbed into someone's share.
 
-Phases 5–8 — receipt parsing, the split-wide summary, payments, sharing, export,
-and multi-currency — are not yet implemented.
+- **Phase 6 (backend)** — split-wide summary, payments, and the public share
+  link. Balances are per member and per currency; mixed-currency splits are
+  never summed, because FX conversion is Phase 7 and adding EUR to USD would
+  invent a number.
+
+Phases 5, 7 and 8 — receipt parsing, export, and multi-currency conversion —
+are not yet implemented, and the Phase 6 views are still stubs.
 
 The full request/response contract lives in [docs/api.md](docs/api.md).
 
@@ -160,6 +165,12 @@ Implemented today:
 | PUT | `/api/bills/:bid/items/:iid/allocations` | Replace an item's allocations |
 | POST | `/api/bills/:bid/items/:iid/even-split` | Split a line evenly (floors to cents) |
 | GET | `/api/splits/:id/bills/:bid/shares` | Per-member breakdown for one bill |
+| GET | `/api/splits/:id/summary` | Balances across every bill, grouped by currency |
+| GET | `/api/splits/:id/payments` | List recorded settlements |
+| POST | `/api/splits/:id/payments` | Record that money moved |
+| DELETE | `/api/splits/:id/payments/:pid` | Delete a payment record |
+| GET | `/api/splits/share/:token` | **Public**, no auth — read-only split view |
+| POST | `/api/splits/:id/share/regenerate` | New share token; old link stops working |
 
 Sessions are opaque 32-byte tokens in the `sessions` table, sent as an HttpOnly
 `session` cookie or an `Authorization: Bearer` header. Passwords are PBKDF2-

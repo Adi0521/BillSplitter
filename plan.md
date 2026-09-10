@@ -481,10 +481,15 @@ cd frontend && npm install && npm run dev
 - [ ] `ReceiptUploader.vue` drag-drop + preview/edit flow
 
 ### Phase 6 — Summary, Payments, Sharing
-- [ ] Summary endpoint with net payer amounts
-- [ ] `PaymentTracker.vue` — record payments, method/notes
-- [ ] Share token generation + `ShareView.vue` (public, no auth)
-- [ ] Email "notify all" after finalization
+- [x] Summary endpoint — per-member **balances**, not "everyone owes the payer".
+      plan.md's original framing only holds when one person fronts every bill;
+      across a real split each member needs
+      `fronted + payments_made - owes - payments_received`.
+- [x] Payments CRUD (`/api/splits/:id/payments`)
+- [x] Share token + public read-only endpoint (`/api/splits/share/:token`)
+- [ ] `PaymentTracker.vue`, `SplitSummaryView.vue`, `ShareView.vue`
+- [ ] Email "notify all" — still deferred: no mail service is configured, same
+      reason member invite is deferred from Phase 2.
 
 ### Phase 7 — Export & Currency
 - [ ] PDF export endpoint (server-side)

@@ -447,7 +447,213 @@ and normalization land with the rest of Phase 7.
 
 ---
 
+## Phase 6 — Split summary
+
+Everything owed across every bill in a split, net of who fronted what and who
+has already settled up.
+
+### Balances, not "who owes the payer"
+
+plan.md frames this as "each non-payer owes the payer". That only holds when one
+person fronts every bill. Across a real split Alice pays for dinner and Bob pays
+for the taxi, so each member needs a **balance**:
+
+```
+balance = fronted + payments_made - owes - payments_received
+```
+
+- `owes` — their share of line items plus proportional tax/tip/fees, summed
+  over every bill (the Phase 4 arithmetic, per bill, added up)
+- `fronted` — the full total of every bill where they are `payer_member_id`
+- `payments_made` / `payments_received` — recorded settlements
+
+A **positive** balance means the split owes them; **negative** means they owe.
+The two sides sum to zero only to within the documented rounding residual and
+the unallocated remainder, and the response does not force them to tie.
+
+### Mixed currencies are never summed
+
+FX conversion is Phase 7. Until then a split holding a EUR bill and a USD bill
+has two independent sets of balances, and adding them would invent a number.
+
+So the summary is **grouped by currency**: `by_currency` has one entry per
+currency used by the split's bills **or by its payments**. A normal
+single-currency split has exactly one entry. Nothing is ever converted or
+combined.
+
+The union matters. A payment's `currency` defaults to the *split's* currency, so
+a USD split whose bills are all in EUR produces a USD payment with no USD bill
+behind it. Deriving the list from bills alone left that payment in no block at
+all — money the user recorded, silently absent from every balance. Such a
+currency reports `bill_count: 0` and `total: "0.0000"`, which is the truth:
+no bills, but money moved.
+
+```jsonc
+// SplitSummary
+{
+  "split_id":   "uuid",
+  "name":       "Tahoe trip",
+  "base_currency": "USD",           // the split's own currency
+  "mixed_currency": false,          // true when by_currency has more than one entry
+  "by_currency": [
+    {
+      "currency":   "USD",
+      "bill_count": 3,
+      "total":      "182.4700",     // sum of those bills' totals
+      "unallocated": {              // the part nobody is on the hook for
+        "items": "10.0000", "tax": "0.6200", "tip": "0.0000",
+        "fees": "0.0000", "total": "10.6200"
+      },
+      "members": [
+        {
+          "member_id": "uuid",
+          "name":      "Alice",
+          "owes":      "61.2400",   // their share across every bill
+          "fronted":   "120.0000",  // bills they paid for
+          "payments_made":     "0.0000",
+          "payments_received": "20.0000",
+          "balance":   "38.7600"    // positive: the split owes them
+        }
+      ],
+      "settlements": [
+        { "from_member": "uuid", "from_name": "Bob",
+          "to_member":   "uuid", "to_name":   "Alice",
+          "amount": "38.7600" }
+      ]
+    }
+  ]
+}
+```
+
+| Method | Path | Response |
+|---|---|---|
+| GET | `/api/splits/:id/summary` | 200 `SplitSummary` |
+
+- A split with neither bills nor payments returns `by_currency: []` — not an
+  error, and not a fabricated zero row for the split's own currency.
+- Members with no activity still appear, with zeros.
+
+### Settlements
+
+`settlements` is a suggested set of transfers that clears the balances: repeatedly
+match the largest debtor against the largest creditor. It is **a** valid
+settlement, not provably the minimal one, and the contract does not promise
+stability across calls — say so in the UI rather than presenting it as the
+answer.
+
+This is the one place a computed amount is not derived by Postgres. Do it in
+**integer arithmetic on scaled values** (1/10000ths), never floating point:
+these amounts are only being *paired*, never re-derived, so exactness is
+achievable and required. A settlement that is a hundredth of a cent off from the
+balance it clears is a bug.
+
+Rounding residue means the balances may not sum to exactly zero. Settle what can
+be matched and stop; do not invent a transfer to absorb the difference.
+
+---
+
+## Phase 6 — Payments
+
+A record that money actually moved. Payments never change what anyone *owes* —
+they change the balance.
+
+```jsonc
+// Payment
+{
+  "id":          "uuid",
+  "split_id":    "uuid",
+  "from_member": "uuid",
+  "from_name":   "Bob",
+  "to_member":   "uuid",
+  "to_name":     "Alice",
+  "amount":      "20.0000",
+  "currency":    "USD",
+  "method":      "venmo",      // free text, or null
+  "notes":       null,
+  "paid_at":     "2026-09-09 10:14:02.123+00"
+}
+```
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/splits/:id/payments` | — | 200 `[Payment]`, newest first |
+| POST | `/api/splits/:id/payments` | `{from_member, to_member, amount, currency?, method?, notes?}` | 201 `Payment` |
+| DELETE | `/api/splits/:id/payments/:pid` | — | 200 `{"message":"Deleted"}` |
+
+### Validation
+
+| Field | Rule |
+|---|---|
+| `from_member`, `to_member` | required, uuids, both members of **this** split, and **not equal** |
+| `amount` | required, `> 0`, max 4 decimals, ≤ 99999999.9999 |
+| `currency` | optional, 3 ASCII letters, uppercased; defaults to the split's currency |
+| `method` | optional, ≤ 50 chars, free text — not an enum |
+| `notes` | optional, ≤ 1000 chars |
+
+- `from_member == to_member` is a 400: paying yourself is always a mistake, and
+  it would silently distort the balances.
+- A member id from another split is a 400 (the split was found; the body is wrong).
+- The schema allows both member columns to be NULL; the API does not. A payment
+  with no sender or no recipient cannot affect a balance and is only ever a bug.
+- Payments are **not** validated against what anyone owes. Overpaying, paying
+  early, and settling a debt someone else incurred are all real things people do.
+
+---
+
+## Phase 6 — Public share link
+
+A read-only view of a split for people without an account.
+
+| Method | Path | Auth | Response |
+|---|---|---|---|
+| GET | `/api/splits/share/:token` | **none** | 200 `PublicSplit` |
+| POST | `/api/splits/:id/share/regenerate` | owner | 200 `{"share_token": "..."}` |
+
+`splits.share_token` is 32 hex characters from `gen_random_bytes(16)` — 128 bits,
+so enumeration is not a concern and the endpoint is not rate limited.
+
+### What the public view must NOT contain
+
+This is the only unauthenticated endpoint that returns user data, so the
+omissions are the specification:
+
+- **no email addresses** — not the owner's, not any member's
+- **no `user_id`s** — they link members to accounts
+- **no `split_id`** or any other internal id that grants access elsewhere
+- **no `share_token`** echoed back in the body
+- member `id`s are included only where the UI needs them to key rows
+
+```jsonc
+// PublicSplit
+{
+  "name": "Tahoe trip",
+  "description": "",
+  "type": "one_time",
+  "base_currency": "USD",
+  "mixed_currency": false,
+  "created_at": "2026-08-30 22:51:45.947108+00",
+  "bills": [
+    { "store_name": "Safeway", "date": "2026-08-30", "currency": "USD",
+      "total": "65.3200", "payer_name": "Alice", "item_count": 4 }
+  ],
+  "by_currency": [ /* same shape as SplitSummary.by_currency */ ],
+  "payments": [
+    { "from_name": "Bob", "to_name": "Alice", "amount": "20.0000",
+      "currency": "USD", "method": "venmo", "paid_at": "..." }
+  ]
+}
+```
+
+- An **archived** split still resolves — a link shared before archiving should
+  not break — but the response carries `"archived": true` so the UI can say so.
+- An unknown or malformed token is a **404** with the standard error envelope.
+  Do not distinguish "never existed" from "regenerated": both are 404.
+- `POST /share/regenerate` invalidates the old link immediately and requires the
+  owner; a non-owner gets 404.
+
+---
+
 ## Not yet implemented
 
-The split-wide summary, payments, share links, export, and currency endpoints
-are specified in [plan.md](../plan.md) and are not built yet.
+Receipt parsing (Phase 5), export, and multi-currency conversion (Phase 7) are
+specified in [plan.md](../plan.md) and are not built yet.
