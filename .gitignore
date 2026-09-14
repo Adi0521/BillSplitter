@@ -15,3 +15,7 @@ frontend/.env.local
 
 # VSCode
 .vscode/settings.json
+
+# Python
+__pycache__/
+*.pyc

@@ -72,3 +72,12 @@ export function formatMoney(raw) {
   const n = Number(raw)
   return Number.isFinite(n) ? n.toFixed(2) : String(raw)
 }
+
+// True for a NUMERIC string that represents nothing: "0.0000", "0", "-0.00", or
+// an absent value. Used to decide whether a panel or a row is worth rendering —
+// it answers a question about a string and never derives an amount, so it is
+// safe where arithmetic would not be.
+export function isZeroAmount(raw) {
+  const s = String(raw ?? '').trim()
+  return s === '' || /^-?0*(\.0*)?$/.test(s)
+}

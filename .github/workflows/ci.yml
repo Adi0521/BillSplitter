@@ -34,7 +34,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             cmake g++ libpqxx-dev libpq-dev libssl-dev libcurl4-openssl-dev \
-            libasio-dev postgresql-client pkg-config
+            libasio-dev postgresql-client pkg-config \
+            libtesseract-dev libleptonica-dev tesseract-ocr-eng
 
       # Crow and nlohmann/json come from FetchContent; caching the whole build
       # tree keeps the dependency clone out of every run.
@@ -58,6 +59,9 @@ jobs:
             echo "::error::build produced warnings"
             exit 1
           fi
+
+      - name: C++ unit tests
+        run: ./backend/build/unit-tests
 
       - name: API integration tests
         env:

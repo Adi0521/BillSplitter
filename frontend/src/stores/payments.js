@@ -22,8 +22,10 @@ export const usePaymentsStore = defineStore('payments', () => {
   const summary  = ref(null)
   const publicSplit = ref(null)
 
-  // Recording or deleting a payment changes every balance, so the summary is
-  // refetched rather than adjusted locally.
+  // Recording or deleting a payment changes every balance, so the summary must
+  // be refetched — but by the caller, not from in here. A store that silently
+  // refetches on write leaves the view unable to surface a failed refresh, and
+  // pairs with the view's own refetch to fire two requests for one action.
   let summarySeq = 0
 
   async function fetchPayments(splitId) {
@@ -38,7 +40,6 @@ export const usePaymentsStore = defineStore('payments', () => {
     try {
       const { data } = await api.post(`/splits/${splitId}/payments`, payload)
       payments.value = [data, ...payments.value]
-      await fetchSummary(splitId).catch(() => {})
       return data
     } catch (e) { throw normalize(e) }
   }
@@ -47,7 +48,6 @@ export const usePaymentsStore = defineStore('payments', () => {
     try {
       await api.delete(`/splits/${splitId}/payments/${paymentId}`)
       payments.value = payments.value.filter(p => p.id !== paymentId)
-      await fetchSummary(splitId).catch(() => {})
     } catch (e) { throw normalize(e) }
   }
 

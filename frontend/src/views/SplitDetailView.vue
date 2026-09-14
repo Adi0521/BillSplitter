@@ -84,14 +84,23 @@
               </p>
             </div>
 
-            <button
-              v-if="!editingName"
-              type="button"
-              class="btn-secondary shrink-0 text-xs px-3 py-1.5"
-              @click="startRename"
-            >
-              Rename
-            </button>
+            <div v-if="!editingName" class="flex shrink-0 gap-2">
+              <!-- The summary is where the split's balances live; without a
+                   link here the page is only reachable by typing the URL. -->
+              <router-link
+                :to="{ name: 'SplitSummary', params: { id: route.params.id } }"
+                class="btn-secondary text-xs px-3 py-1.5"
+              >
+                Who owes what
+              </router-link>
+              <button
+                type="button"
+                class="btn-secondary text-xs px-3 py-1.5"
+                @click="startRename"
+              >
+                Rename
+              </button>
+            </div>
           </div>
 
           <div class="mt-4 flex flex-wrap items-center gap-2">

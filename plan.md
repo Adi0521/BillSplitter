@@ -475,10 +475,17 @@ cd frontend && npm install && npm run dev
       every amount today is in the bill's own currency
 
 ### Phase 5 — Receipt Parsing
-- [ ] `ReceiptParser` abstract interface + `ClaudeReceiptParser` impl
-- [ ] `HtmlReceiptParser` for Walmart/Amazon/Costco HTML
-- [ ] PDF text extraction pipeline
-- [ ] `ReceiptUploader.vue` drag-drop + preview/edit flow
+- [x] Local OCR (Tesseract + Leptonica) with a pooled engine, image
+      preprocessing, and a unit-tested line parser — **chosen over an AI
+      provider so receipts never leave the machine.** The `ReceiptParser`
+      seam remains, so a hosted parser can be added later as a second
+      implementation rather than a rewrite.
+- [x] HTML receipts: tags stripped to text, straight into the same line parser.
+      Deliberately *not* store-specific parsers for Walmart/Amazon/Costco —
+      retailer markup changes silently and the failure mode is a wrong price.
+- [ ] PDF — deferred. Tesseract cannot read PDFs and rasterizing needs another
+      dependency (poppler). Currently a 415 that says so.
+- [x] `ReceiptUploader.vue` drag-drop + preview/edit flow
 
 ### Phase 6 — Summary, Payments, Sharing
 - [x] Summary endpoint — per-member **balances**, not "everyone owes the payer".
@@ -487,7 +494,7 @@ cd frontend && npm install && npm run dev
       `fronted + payments_made - owes - payments_received`.
 - [x] Payments CRUD (`/api/splits/:id/payments`)
 - [x] Share token + public read-only endpoint (`/api/splits/share/:token`)
-- [ ] `PaymentTracker.vue`, `SplitSummaryView.vue`, `ShareView.vue`
+- [x] `PaymentTracker.vue`, `SplitSummaryView.vue`, `ShareView.vue`
 - [ ] Email "notify all" — still deferred: no mail service is configured, same
       reason member invite is deferred from Phase 2.
 
@@ -498,6 +505,10 @@ cd frontend && npm install && npm run dev
 - [ ] Currency selector in split/bill creation
 
 ### Phase 8 — Polish
+- [ ] **Request body cap.** Crow buffers the whole body before dispatch and has
+      no app-level limit, so the 10 MB receipt cap only binds cooperative
+      clients. Needs a reverse proxy in front, or a patched/forked Crow
+      connection. See README, "Known limitation: request body size".
 - [ ] CMakeLists.txt finalized
 - [ ] Input validation everywhere
 - [ ] Error handling (DB failures, SendGrid failures, AI timeouts)

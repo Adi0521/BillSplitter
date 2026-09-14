@@ -28,13 +28,20 @@ Phases 1 and 2 are complete and verified end to end.
   arithmetic: over-allocation is blocked, under-allocation is legitimate, and
   the rounding remainder is reported rather than absorbed into someone's share.
 
-- **Phase 6 (backend)** — split-wide summary, payments, and the public share
+- **Phase 6** — split-wide summary, payments, and the public share
   link. Balances are per member and per currency; mixed-currency splits are
   never summed, because FX conversion is Phase 7 and adding EUR to USD would
   invent a number.
 
-Phases 5, 7 and 8 — receipt parsing, export, and multi-currency conversion —
-are not yet implemented, and the Phase 6 views are still stubs.
+- **Phase 5 (backend)** — receipt parsing. Images are OCR'd locally with
+  Tesseract and run through a line parser; nothing is sent to a third party and
+  no API key is needed. The endpoint **persists nothing** — it returns a draft
+  the user edits and confirms through the ordinary Phase 3 endpoints, so an
+  OCR'd number passes exactly the same validation as a typed one.
+
+Phases 7 and 8 — export and multi-currency conversion — are not yet
+implemented. Email "notify all" and member invites remain deferred:
+no mail service is configured.
 
 The full request/response contract lives in [docs/api.md](docs/api.md).
 
@@ -43,7 +50,7 @@ The full request/response contract lives in [docs/api.md](docs/api.md).
 macOS with Homebrew:
 
 ```bash
-brew install cmake libpqxx openssl@3 libpq asio
+brew install cmake libpqxx openssl@3 libpq asio tesseract
 brew install --cask docker    # or have Postgres 16 available some other way
 ```
 
@@ -85,6 +92,26 @@ linked unit test reaches. Standard library only, so CI needs nothing but Python.
 Tests assert the **contract** in [docs/api.md](docs/api.md), not current
 behaviour. A test that fails because the code disagrees with the contract is
 doing its job; fix the code, or change the contract deliberately.
+
+## Known limitation: request body size
+
+**Crow 1.3.3 buffers an entire request body before dispatching it to a handler,
+and exposes no application-level cap** (`max_payload` is websocket-only). The
+receipt upload endpoint rejects anything over 10 MB from `Content-Length` at the
+very top of the handler — before auth, the database, the multipart copy, and
+OCR — but by then the bytes are already in memory.
+
+A cooperative client is therefore capped at 10 MB; a hostile one can still make
+the process buffer an arbitrarily large body before receiving its 413. **Any
+deployment reachable by untrusted clients must enforce a body limit in front of
+the server**, e.g.:
+
+```nginx
+client_max_body_size 10m;
+```
+
+This is the only known unbounded-memory path in the API. Every other endpoint
+takes a small JSON body.
 
 ## Migrations
 
@@ -169,6 +196,7 @@ Implemented today:
 | GET | `/api/splits/:id/payments` | List recorded settlements |
 | POST | `/api/splits/:id/payments` | Record that money moved |
 | DELETE | `/api/splits/:id/payments/:pid` | Delete a payment record |
+| POST | `/api/splits/:id/bills/parse` | Upload a receipt image/HTML, get an unsaved draft |
 | GET | `/api/splits/share/:token` | **Public**, no auth — read-only split view |
 | POST | `/api/splits/:id/share/regenerate` | New share token; old link stops working |
 

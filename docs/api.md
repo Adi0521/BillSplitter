@@ -653,7 +653,117 @@ omissions are the specification:
 
 ---
 
+## Phase 5 — Receipt parsing
+
+Turn a photo or an HTML export of a receipt into a **draft** the user edits and
+confirms. Local OCR (Tesseract) plus a line parser — nothing is sent to a
+third party, and no API key is required.
+
+### Parsing is a suggestion, never a source of truth
+
+The endpoint **persists nothing**. It returns a draft; the user reviews and
+edits it, and confirming goes through the ordinary Phase 3 endpoints
+(`POST /bills`, `POST /bills/:bid/items`) with the ordinary validation. There is
+no path by which an OCR'd number reaches the database without passing the same
+checks as a typed one.
+
+This matters more here than anywhere else in the system. OCR misreads `8` as
+`3`, drops a decimal point, and merges two columns — and unlike a typo, it does
+it confidently. So the contract is: **the parser proposes, the human disposes.**
+
+### What it does not do
+
+- It does not create a bill, items, or allocations.
+- It does not decide anything from the receipt's own totals. `subtotal` stays
+  derived from items, exactly as in Phase 3.
+- It does not invent a line it could not read. An unreadable line is reported as
+  unmatched text, never as an item with a guessed price.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| POST | `/api/splits/:id/bills/parse` | `multipart/form-data`, field `file` | 200 `ReceiptDraft` |
+
+```jsonc
+// ReceiptDraft — nothing here has been saved
+{
+  "source": "image",            // "image" | "html"
+  "store_name": "SAFEWAY",      // best guess, may be ""
+  "date": "2026-09-01",         // best guess, may be null
+  "currency": "USD",            // the split's currency; OCR does not guess this
+  "items": [
+    { "name": "MILK 2%", "price": "3.4900", "quantity": 1, "confidence": 0.94 }
+  ],
+  "tax":  "0.5200",             // read from the receipt, may be null
+  "tip":  null,
+  "total_read": "6.5000",       // what the receipt SAYS the total is, may be null
+  "items_total": "5.9800",      // what the parsed items actually add up to
+  "totals_agree": false,        // items_total + tax + tip vs total_read;
+                                //   null when the receipt printed no total
+  "unmatched_lines": [          // lines we could not turn into items
+    "MFR COUPON  -0.50",
+    "MEMBER SAVINGS 1.20"
+  ],
+  "warnings": [
+    "The parsed items do not add up to the total printed on the receipt. Some lines may be missing or misread."
+  ]
+}
+```
+
+### The totals cross-check
+
+`total_read` is what the receipt claims; `items_total` is what the parsed items
+sum to. **They are reported side by side and never reconciled.** When they
+disagree, `totals_agree` is false and a warning says so.
+
+`totals_agree` is **`null`, not `true`,** when the receipt printed no total at
+all. "The totals agree" and "there was nothing to check" are different facts,
+and reporting the second as the first claims a verification that never ran.
+
+This is the single most valuable output of the parser: a mismatch is how a user
+learns that a line was dropped or a price misread, and it costs nothing to
+compute. Silently trusting either number would throw that signal away.
+
+The comparison is done in **integer cents**, never floating point.
+
+### Confidence
+
+Each item carries the OCR engine's mean word confidence for its line, `0.0`-`1.0`.
+The UI uses it to flag rows worth a second look. It is a hint about
+*legibility*, not about correctness — a crisply printed wrong price scores 1.0.
+
+### What the line parser recognizes
+
+| Shape | Example | Result |
+|---|---|---|
+| name then trailing price | `MILK 2%      3.49` | item, qty 1 |
+| trailing tax flag | `MILK 2%      3.49 T` | item; the flag is stripped |
+| explicit quantity | `2 @ 1.75      3.50` | item, qty 2, unit price 1.75 |
+| weighted goods | `0.87 lb @ 2.99/lb   2.60` | item, qty 1, price 2.60 |
+| wrapped name | name on one line, price on the next | joined into one item |
+| keyword line | `SUBTOTAL`, `TAX`, `TOTAL`, `CHANGE`, `VISA`, `AUTH` | metadata, not an item |
+| negative amount | `MFR COUPON   -0.50` | **unmatched** — see below |
+| no price on the line | store address, phone, loyalty blurb | ignored |
+
+**Negative amounts are never items.** `bill_items.price` is `CHECK (price >= 0)`,
+so a coupon cannot be represented as one. Folding it into the preceding item
+would silently rewrite a price the user never saw. It goes in
+`unmatched_lines` for the user to apply as they see fit.
+
+### Validation and limits
+
+| Rule | Value |
+|---|---|
+| max upload size | 10 MB — rejected with 413 before the body is read into memory |
+| accepted types | `image/png`, `image/jpeg`, `image/webp`, `image/tiff`, `text/html` |
+| PDF | **not supported yet** — 415 with a message saying so. Tesseract cannot read PDFs and rasterizing needs another dependency |
+| ownership | the split must belong to the caller; otherwise 404 |
+
+A file whose declared type and actual content disagree is judged on **content**
+(magic bytes), not on the declared `Content-Type`, which a client controls.
+
+---
+
 ## Not yet implemented
 
-Receipt parsing (Phase 5), export, and multi-currency conversion (Phase 7) are
-specified in [plan.md](../plan.md) and are not built yet.
+Export and multi-currency conversion (Phase 7) are specified in
+[plan.md](../plan.md) and are not built yet.

@@ -79,29 +79,51 @@ else()
     endif()
 endif()
 
+# ── Tesseract + Leptonica (local OCR for receipt parsing) ─────────────────────
+# Receipts are OCR'd on this machine rather than sent to a third party, so no
+# API key is needed and no purchase history leaves the host.
+pkg_check_modules(TESSERACT IMPORTED_TARGET tesseract)
+pkg_check_modules(LEPTONICA IMPORTED_TARGET lept)
+if(NOT TARGET PkgConfig::TESSERACT OR NOT TARGET PkgConfig::LEPTONICA)
+    message(FATAL_ERROR
+        "tesseract and leptonica are required.\n"
+        "  macOS:  brew install tesseract\n"
+        "  Ubuntu: apt-get install libtesseract-dev libleptonica-dev tesseract-ocr-eng")
+endif()
+
 # ── Sources ────────────────────────────────────────────────────────────────────
-file(GLOB_RECURSE SOURCES
-    "src/*.cpp"
-)
+# Everything except main() goes into a static library, so the unit tests can
+# link the same objects the server runs. Without this split there is no way to
+# reach a function from a test binary, which is why the receipt line parser —
+# pure text-in, items-out — could not otherwise be tested directly.
+file(GLOB_RECURSE CORE_SOURCES "src/*.cpp")
+list(REMOVE_ITEM CORE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
 
-add_executable(billsplitter-backend ${SOURCES})
+add_library(billsplitter-core STATIC ${CORE_SOURCES})
 
-target_include_directories(billsplitter-backend PRIVATE
+target_include_directories(billsplitter-core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${PostgreSQL_INCLUDE_DIRS}
 )
 
-target_link_libraries(billsplitter-backend PRIVATE
+target_link_libraries(billsplitter-core PUBLIC
     Crow::Crow
     nlohmann_json::nlohmann_json
     OpenSSL::SSL
     OpenSSL::Crypto
     CURL::libcurl
     billsplitter::pqxx
+    PkgConfig::TESSERACT
+    PkgConfig::LEPTONICA
     ${PostgreSQL_LIBRARIES}
 )
 
-# Compiler warnings
+target_compile_options(billsplitter-core PRIVATE
+    -Wall -Wextra -Wno-unused-parameter
+)
+
+add_executable(billsplitter-backend src/main.cpp)
+target_link_libraries(billsplitter-backend PRIVATE billsplitter-core)
 target_compile_options(billsplitter-backend PRIVATE
     -Wall -Wextra -Wno-unused-parameter
 )
@@ -119,3 +141,24 @@ add_test(
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
 )
 set_tests_properties(api-integration PROPERTIES TIMEOUT 600)
+
+# ── C++ unit tests ────────────────────────────────────────────────────────────
+# For logic that is genuinely in C++ rather than in SQL. The receipt line parser
+# is the first such thing: pure text-in, items-out, so hundreds of awkward
+# receipt shapes can be checked in milliseconds without a database or a server.
+# doctest rather than Catch2 purely for compile speed — it is a single header.
+FetchContent_Declare(
+    doctest
+    GIT_REPOSITORY https://github.com/doctest/doctest.git
+    GIT_TAG        v2.4.11
+)
+FetchContent_MakeAvailable(doctest)
+
+file(GLOB_RECURSE UNIT_TEST_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/../tests/unit/*.cpp")
+if(UNIT_TEST_SOURCES)
+    add_executable(unit-tests ${UNIT_TEST_SOURCES})
+    target_link_libraries(unit-tests PRIVATE billsplitter-core doctest::doctest)
+    target_compile_options(unit-tests PRIVATE -Wall -Wextra -Wno-unused-parameter)
+    add_test(NAME unit COMMAND unit-tests)
+    set_tests_properties(unit PROPERTIES TIMEOUT 120)
+endif()

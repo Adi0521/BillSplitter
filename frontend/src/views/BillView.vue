@@ -674,7 +674,7 @@ import ItemAllocator from '@/components/ItemAllocator.vue'
 import { useBillsStore } from '@/stores/bills'
 import { useSplitsStore } from '@/stores/splits'
 import { useAllocationsStore } from '@/stores/allocations'
-import { formatDay, formatMoney, itemLabel } from '@/lib/format'
+import { formatDay, formatMoney, itemLabel, isZeroAmount } from '@/lib/format'
 
 const route       = useRoute()
 const bills       = useBillsStore()
@@ -861,15 +861,6 @@ function allocSet(item) {
 
 function allocNames(item) {
   return (allocSet(item)?.allocations ?? []).map(a => a.member_name).join(', ')
-}
-
-// True for "0", "0.00", "0.0000" — a string test on purpose. Turning these into
-// Numbers to compare against 0 would be the float round trip the whole money
-// path avoids, and this is only ever used to decide what to show, never what
-// to send.
-function isZeroAmount(raw) {
-  const s = String(raw ?? '').trim()
-  return s === '' || /^-?0*(\.0*)?$/.test(s)
 }
 
 function resetForms() {
