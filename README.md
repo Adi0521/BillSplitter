@@ -98,7 +98,8 @@ doing its job; fix the code, or change the contract deliberately.
 See [DEPLOYMENT.md](DEPLOYMENT.md). In short: the frontend is a static SPA and
 can go anywhere; the backend is a long-running C++ process and needs a container
 host, not a serverless platform. No Supabase feature is used — any PostgreSQL
-works, though it must be **libpqxx 7 compatible** to build.
+server works. Building the backend needs **libpqxx >= 7.10** (Ubuntu 24.04's 7.8
+is not enough); see DEPLOYMENT.md.
 
 ## Known limitation: request body size
 

@@ -41,7 +41,10 @@ echo "==> applying migrations"
 DATABASE_URL="$TEST_URL" ./scripts/migrate.sh >/dev/null
 
 echo "==> starting backend on :$PORT"
-log="$(mktemp -t billsplitter-test-server)"
+# Plain mktemp: "-t PREFIX" is BSD syntax that GNU coreutils rejects with
+# "too few X's in template", so the -t form works on macOS and fails on Linux —
+# including in CI.
+log="$(mktemp)"
 # A low failure ceiling makes the throttle reachable in a test without
 # hundreds of requests. Everything else runs at its production default.
 DATABASE_URL="$TEST_URL" PORT="$PORT" APP_BASE_URL="http://localhost:5173" \

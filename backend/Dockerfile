@@ -10,6 +10,10 @@
 # ── Build stage ───────────────────────────────────────────────────────────────
 # Crow, nlohmann/json and doctest arrive via FetchContent, so the builder needs
 # git and network access. Everything else is a system package.
+# trixie, not bookworm or Ubuntu 24.04: this code calls the two-argument
+# txn.exec(sql, params) added in libpqxx 7.10. bookworm has 6.4 (no
+# pqxx::params at all) and Ubuntu 24.04 has 7.8 (params, but not that
+# overload). Check `pkg-config --modversion libpqxx` before changing this.
 FROM debian:trixie-slim AS build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

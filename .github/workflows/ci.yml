@@ -10,6 +10,13 @@ jobs:
     name: Backend build + API tests
     runs-on: ubuntu-latest
 
+    # Runs inside Debian trixie, not on the ubuntu-latest image, because this
+    # code needs libpqxx >= 7.10 for the two-argument txn.exec(sql, params).
+    # Ubuntu 24.04 ships 7.8, which has pqxx::params but not that overload, and
+    # Debian bookworm ships 6.4, which has neither. trixie ships 7.10 — the same
+    # base backend/Dockerfile uses, so CI builds what actually gets deployed.
+    container: debian:trixie-slim
+
     services:
       postgres:
         image: postgres:16-alpine
@@ -17,7 +24,8 @@ jobs:
           POSTGRES_USER: billsplitter
           POSTGRES_PASSWORD: billsplitter
           POSTGRES_DB: postgres
-        ports: ['5433:5432']
+        # No port mapping: from inside a job container the service is reached
+        # by its label on the Docker network, as postgres:5432.
         # Without a health check the job races the database and fails
         # intermittently, which is worse than failing consistently.
         options: >-
@@ -29,16 +37,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Ubuntu 24.04 ships libpqxx 7.8. This codebase uses the libpqxx 7 API
-      # (pqxx::params, txn.exec(sql, params)) — Debian bookworm's 6.4 cannot
-      # build it, which is why the Dockerfile is on trixie.
+      # A job container is bare: build-essential (make), git for FetchContent,
+      # python3 for the API suite and curl for the health poll all have to be
+      # installed explicitly. The ubuntu-latest image preinstalls them, which is
+      # exactly the difference that made this job fail obscurely.
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake g++ libpqxx-dev libpq-dev libssl-dev libcurl4-openssl-dev \
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential cmake git ca-certificates curl python3 \
+            libpqxx-dev libpq-dev libssl-dev libcurl4-openssl-dev \
             libasio-dev postgresql-client pkg-config \
             libtesseract-dev libleptonica-dev tesseract-ocr-eng
+
+      - name: Record the libpqxx version actually in use
+        run: pkg-config --modversion libpqxx
 
       # Crow and nlohmann/json come from FetchContent; caching the whole build
       # tree keeps the dependency clone out of every run.
@@ -51,8 +64,13 @@ jobs:
       - name: Configure
         run: cmake -S backend -B backend/build -DCMAKE_BUILD_TYPE=Debug
 
+      # Redirected, not piped: `cmake --build ... | tee` reports tee's exit
+      # status, and the default shell has no pipefail — so a failed build
+      # passed this step and surfaced later as a missing unit-test binary.
       - name: Build
-        run: cmake --build backend/build -j"$(nproc)" 2>&1 | tee build.log
+        run: |
+          cmake --build backend/build -j"$(nproc)" > build.log 2>&1 \
+            || { echo "::error::build failed"; cat build.log; exit 1; }
 
       # Warnings are how the small mistakes in this codebase have surfaced, so
       # they fail the build rather than scrolling past.
@@ -70,7 +88,8 @@ jobs:
 
       - name: API integration tests
         env:
-          BILLSPLITTER_ADMIN_URL: postgresql://billsplitter:billsplitter@localhost:5433/postgres
+          # Service containers are addressed by label from inside a job container.
+          BILLSPLITTER_ADMIN_URL: postgresql://billsplitter:billsplitter@postgres:5432/postgres
         run: ./scripts/run-api-tests.sh
 
   frontend:

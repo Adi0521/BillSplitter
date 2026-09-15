@@ -30,12 +30,22 @@ trip on every one of them.
 Whichever you pick, confirm it allows `CREATE EXTENSION pgcrypto` — migration
 001 needs `gen_random_uuid()` and `gen_random_bytes()`.
 
-## libpqxx 7 is required
+## libpqxx >= 7.10 is required
 
-This code uses the libpqxx 7 API (`pqxx::params`, `txn.exec(sql, params)`).
-**Debian bookworm ships libpqxx 6.4 and cannot build it** — the Dockerfile is on
-`debian:trixie-slim` (7.10) for that reason, and CI runs Ubuntu 24.04 (7.8).
-If you change the base image, check the libpqxx version first.
+This code calls the two-argument `txn.exec(sql, pqxx::params{...})`, which
+arrived in libpqxx **7.10**. The floor is not "7":
+
+| Distribution | libpqxx | Builds? |
+|---|---|---|
+| Debian bookworm | 6.4 | No — `pqxx::params` does not exist |
+| Ubuntu 24.04 | 7.8 | No — has `pqxx::params`, but not `exec(sql, params)` |
+| Debian trixie | 7.10 | Yes |
+| Homebrew (macOS) | 7.10+ | Yes |
+
+Both the Dockerfile and the CI backend job run on `debian:trixie-slim` for this
+reason, so CI builds the same toolchain that ships. **Check the libpqxx version
+before changing either base image** — the 7.8 failure in particular is easy to
+misread, because `pqxx::params` resolves fine and only the overload is missing.
 
 ## Backend
 
