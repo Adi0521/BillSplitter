@@ -375,12 +375,18 @@ void register_payment_routes(BsApp& app, DbPool& pool) {
                 "  EXISTS(SELECT 1 FROM split_members"
                 "          WHERE id = $2::uuid AND split_id = $3::uuid)",
                 pqxx::params{from_member, to_member, split_id});
-            if (!membership[0][0].as<bool>()) {
+            // Named rather than tested inline: GCC's -Wlogical-not-parentheses
+            // mistakes the angle brackets of `!x.as<bool>()` for a comparison
+            // and warns. Naming the values is clearer anyway.
+            const bool from_is_member = membership[0][0].as<bool>();
+            const bool to_is_member   = membership[0][1].as<bool>();
+
+            if (!from_is_member) {
                 txn.commit();
                 return json_error(400,
                     "from_member must be a member of this split");
             }
-            if (!membership[0][1].as<bool>()) {
+            if (!to_is_member) {
                 txn.commit();
                 return json_error(400,
                     "to_member must be a member of this split");

@@ -55,12 +55,21 @@ int main() {
 
         BsApp app;
 
+        // allow_credentials is what lets the browser attach the session cookie
+        // to a cross-origin request. It is only honoured against an exact
+        // origin — never "*" — which is why APP_BASE_URL must name the real
+        // frontend URL in a cross-origin deployment.
+        //
+        // When the frontend proxies /api to this server instead (the shape
+        // DEPLOYMENT.md recommends), requests are same-origin and none of this
+        // applies.
         app.get_middleware<crow::CORSHandler>()
             .global()
             .headers("Content-Type", "Authorization", "Cookie")
             .methods(crow::HTTPMethod::GET, crow::HTTPMethod::POST,
                      crow::HTTPMethod::PUT, crow::HTTPMethod::DELETE,
                      crow::HTTPMethod::OPTIONS)
+            .allow_credentials()
             .origin(app_base_url);
 
         register_auth_routes(app, pool);

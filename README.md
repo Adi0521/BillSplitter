@@ -93,6 +93,13 @@ Tests assert the **contract** in [docs/api.md](docs/api.md), not current
 behaviour. A test that fails because the code disagrees with the contract is
 doing its job; fix the code, or change the contract deliberately.
 
+## Deploying
+
+See [DEPLOYMENT.md](DEPLOYMENT.md). In short: the frontend is a static SPA and
+can go anywhere; the backend is a long-running C++ process and needs a container
+host, not a serverless platform. No Supabase feature is used — any PostgreSQL
+works, though it must be **libpqxx 7 compatible** to build.
+
 ## Known limitation: request body size
 
 **Crow 1.3.3 buffers an entire request body before dispatching it to a handler,

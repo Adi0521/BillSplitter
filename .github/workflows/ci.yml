@@ -29,6 +29,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Ubuntu 24.04 ships libpqxx 7.8. This codebase uses the libpqxx 7 API
+      # (pqxx::params, txn.exec(sql, params)) — Debian bookworm's 6.4 cannot
+      # build it, which is why the Dockerfile is on trixie.
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -53,10 +56,12 @@ jobs:
 
       # Warnings are how the small mistakes in this codebase have surfaced, so
       # they fail the build rather than scrolling past.
+      # Judges first-party code only. Crow's vendored headers emit
+      # -Wtype-limits under GCC and we do not control them.
       - name: Fail on compiler warnings
         run: |
-          if grep -E "warning:" build.log; then
-            echo "::error::build produced warnings"
+          if grep -E "warning:" build.log | grep -vE "/build/_deps/" | grep . ; then
+            echo "::error::build produced warnings in first-party code"
             exit 1
           fi
 

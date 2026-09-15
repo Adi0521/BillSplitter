@@ -407,7 +407,12 @@ bool find_date(const std::string& line, std::string& out) {
         }
         if (!valid_ymd(y, m, d)) continue;
 
-        char buf[16];
+        // valid_ymd() has already bounded these to a real calendar date, but
+        // size for the widest an int can print ("-2147483648" is 11 chars, so
+        // 3 fields + 2 dashes + NUL = 36). That makes the buffer provably big
+        // enough rather than safe-by-inference from a check two lines up —
+        // which is also what stops GCC's -Wformat-truncation firing.
+        char buf[40];
         std::snprintf(buf, sizeof buf, "%04d-%02d-%02d", y, m, d);
         out = buf;
         return true;

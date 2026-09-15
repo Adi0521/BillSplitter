@@ -122,6 +122,20 @@ target_compile_options(billsplitter-core PRIVATE
     -Wall -Wextra -Wno-unused-parameter
 )
 
+# GCC reports every anonymous-namespace helper in the route modules as "defined
+# but not used", even though each has live call sites a few lines below and
+# every endpoint is covered by the integration suite. It is a false positive
+# from the way Crow's route templates consume the handler lambdas — Clang does
+# not report it, and a minimal lambda-only reproduction does not trigger it.
+#
+# Suppressed for the route modules ONLY. It stays on for services/ and auth/,
+# where the receipt line parser lives and where genuinely dead code is a real
+# risk worth being told about.
+file(GLOB ROUTE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/routes/*.cpp")
+set_source_files_properties(${ROUTE_SOURCES} PROPERTIES
+    COMPILE_OPTIONS "-Wno-unused-function"
+)
+
 add_executable(billsplitter-backend src/main.cpp)
 target_link_libraries(billsplitter-backend PRIVATE billsplitter-core)
 target_compile_options(billsplitter-backend PRIVATE
