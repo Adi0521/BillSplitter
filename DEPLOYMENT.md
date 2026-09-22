@@ -129,6 +129,16 @@ Have the frontend host proxy `/api/*` to the backend. On Vercel, `vercel.json`:
 That file already exists at the repo root with an SPA fallback rule as well —
 just replace the host with the one Render assigned.
 
+Two things about it that cannot be written inside the file itself, because
+Vercel validates `vercel.json` against a strict schema and rejects any unknown
+key — so no comments, not even `//` keys:
+
+- **Root Directory must be set to `frontend`** in the Vercel project settings.
+  That is a dashboard setting, not something `vercel.json` can express.
+- The `/(.*)` → `/index.html` rule is the SPA fallback. Static files are matched
+  before rewrites, so it does not shadow the built assets; it only catches
+  client-side routes like `/splits/<id>/summary` on a hard refresh.
+
 Leave `VITE_API_BASE_URL` unset. The browser sees one origin, so:
 
 - the session cookie works under `SameSite=Lax`, the safer setting
