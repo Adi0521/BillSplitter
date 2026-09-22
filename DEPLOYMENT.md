@@ -117,7 +117,12 @@ path `/api`. That default is not an accident, and there are two ways to deploy:
 
 ### Recommended: same-origin, via a rewrite
 
-Have the frontend host proxy `/api/*` to the backend. On Vercel, `vercel.json`:
+Have the frontend host proxy `/api/*` to the backend. On Vercel, this lives in
+**`frontend/vercel.json`** — it must be inside the project's Root Directory, not
+at the repo root. With Root Directory set to `frontend`, Vercel reads config
+from there and silently ignores a `vercel.json` one level up. The symptom is
+that the site deploys fine but `/api/*` returns Vercel's own NOT_FOUND page and
+deep links 404 instead of falling back to the SPA.
 
 ```json
 {
@@ -126,8 +131,8 @@ Have the frontend host proxy `/api/*` to the backend. On Vercel, `vercel.json`:
   ]
 }
 ```
-That file already exists at the repo root with an SPA fallback rule as well —
-just replace the host with the one Render assigned.
+That file already exists at `frontend/vercel.json` with an SPA fallback rule as
+well — just replace the host with the one Render assigned.
 
 Two things about it that cannot be written inside the file itself, because
 Vercel validates `vercel.json` against a strict schema and rejects any unknown
