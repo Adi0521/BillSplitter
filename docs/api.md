@@ -763,7 +763,65 @@ A file whose declared type and actual content disagree is judged on **content**
 
 ---
 
+## Phase 7 — CSV export
+
+One denormalized, rectangular table of everything in a split: every line item,
+every allocation, every share. Rectangular on purpose — a spreadsheet can pivot
+a flat table into any summary, but cannot un-pick a file with sections in it.
+
+| Method | Path | Response |
+|---|---|---|
+| GET | `/api/splits/:id/export/csv` | 200 `text/csv; charset=utf-8` |
+
+```
+split,bill_date,store,currency,item,unit_price,quantity,line_total,member,share
+Tahoe trip,2026-08-30,Safeway,USD,Olive oil,12.5000,2,25.0000,Alice,15.0000
+Tahoe trip,2026-08-30,Safeway,USD,Olive oil,12.5000,2,25.0000,Bob,10.0000
+Tahoe trip,2026-08-30,Safeway,USD,Bread,3.2500,1,3.2500,,
+```
+
+- **One row per allocation.** An item split three ways is three rows; the item
+  columns repeat. That is what makes it pivotable.
+- **An unallocated item still gets a row**, with `member` and `share` empty. It
+  must not vanish from the export — the whole design surfaces what nobody is on
+  the hook for, and an export that silently omits it would undo that.
+- A bill with no items still appears, with the item columns empty.
+- Money keeps its 4-decimal string form. Spreadsheets parse it as a number.
+- Ordered by bill date, then bill, then item insertion, then member name — so
+  two exports of an unchanged split are byte-identical.
+- Ownership as everywhere: another user's split is a **404**.
+
+### Why balances are not in this file
+
+Per-member balances, settlements and the proportional tax/tip/fees split are
+**not** exported here, and not because they are unimportant. They are computed
+by `GET /api/splits/:id/summary`, and duplicating that SQL into an export module
+would create a second implementation of the money that can drift from the first
+— the exact problem `test_summary_public_agree.py` exists to prevent.
+
+The UI offers the balances as a separate download built from the summary
+response it already holds.
+
+### Two things a CSV writer must get right
+
+**Formula injection.** A field beginning with `=`, `+`, `-`, `@`, tab or CR is
+executed as a formula by Excel and Google Sheets when the file is opened. Item
+names come from receipts and from user input, so `=cmd|...` is reachable. Every
+field beginning with one of those characters is prefixed with a single quote
+(`'`), which spreadsheets treat as "this is text". This is not optional: the
+whole point of the export is that someone opens it in a spreadsheet.
+
+**Header injection in the filename.** The split name goes into
+`Content-Disposition`, and it is user input. Carriage returns, newlines and
+quotes are stripped before it is interpolated, and the name is length-capped.
+A split called `x"\r\nSet-Cookie: ...` must not be able to add a header.
+
+Standard RFC 4180 quoting otherwise: a field containing a comma, a double quote
+or a newline is wrapped in double quotes, and embedded quotes are doubled.
+
+---
+
 ## Not yet implemented
 
-Export and multi-currency conversion (Phase 7) are specified in
+PDF export and multi-currency conversion (Phase 7) are specified in
 [plan.md](../plan.md) and are not built yet.

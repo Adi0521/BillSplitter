@@ -80,7 +80,22 @@
             <router-link :to="`/splits/${splitId}`" class="btn-secondary text-xs px-3 py-1.5">
               Bills &amp; members
             </router-link>
+            <!-- A plain link, not a fetch: the browser downloads it directly and
+                 sends the session cookie itself. Wrapping this in JavaScript to
+                 build a blob would add a failure mode for no benefit. -->
+            <a
+              :href="csvUrl"
+              class="btn-secondary text-xs px-3 py-1.5"
+              download
+            >
+              Export CSV
+            </a>
           </div>
+          <p class="mt-2 text-xs text-gray-500">
+            The CSV is one row per person per item — a flat table you can pivot.
+            It carries the line items and who is on them, not the balances above,
+            which the server works out from them.
+          </p>
 
           <p v-if="refreshError" class="mt-3 text-xs text-amber-700">
             Couldn’t refresh ({{ refreshError }}). The figures below are from the
@@ -354,6 +369,7 @@ import { storeToRefs } from 'pinia'
 import AppLayout from '@/components/AppLayout.vue'
 import PaymentTracker from '@/components/PaymentTracker.vue'
 import { usePaymentsStore } from '@/stores/payments'
+import { apiBaseURL } from '@/api'
 import { useSplitsStore } from '@/stores/splits'
 import { useBillsStore } from '@/stores/bills'
 import { formatMoney, formatDay, billLabel, pluralize, isZeroAmount } from '@/lib/format'
@@ -368,6 +384,10 @@ const { current: split, members } = storeToRefs(splits)
 const { bills: billList } = storeToRefs(bills)
 
 const splitId = computed(() => route.params.id)
+
+// Same base the axios client uses, so the link keeps working when the API
+// is configured to live on another origin.
+const csvUrl = computed(() => `${apiBaseURL}/splits/${splitId.value}/export/csv`)
 
 // The store holds one summary at a time and it is shared with the share view,
 // so a stale one from a previously viewed split must not be rendered against

@@ -1,0 +1,44 @@
+# Render Blueprint — declares the backend and its database in code.
+#
+# In the Render dashboard: New → Blueprint → pick this repo. Render reads this
+# file, creates both resources, and wires DATABASE_URL between them. The two
+# `sync: false` values must be entered by hand; see DEPLOYMENT.md.
+#
+# Free-tier realities this file is shaped around (verify current terms — they
+# change):
+#   - A free web service spins down after idle and cold-starts on the next
+#     request. This app rebuilds its connection pool and OCR engines lazily, so
+#     that costs one slow first request, not a failure.
+#   - 512 MB of memory. Each Tesseract engine holds a language model, so the
+#     OCR pool is 1 here rather than the default 4.
+
+services:
+  - type: web
+    name: billsplitter-backend
+    runtime: docker
+    plan: free
+    region: oregon                 # keep the database in the same region
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      # Supabase's Transaction pooler URI (port 6543) with ?sslmode=require —
+      # entered in the dashboard, never committed. Use the pooler, not the
+      # direct connection: on the free tier direct connections are IPv6-only
+      # and Render does not guarantee IPv6 egress, so the direct URL can fail
+      # to connect with no obvious error.
+      - key: DATABASE_URL
+        sync: false
+      - key: APP_BASE_URL
+        sync: false                # your Vercel URL, https://...; set in dashboard
+      - key: BILLSPLITTER_OCR_POOL
+        value: "1"                 # 512 MB: one engine, not four
+      - key: SESSION_COOKIE_SECURE
+        value: "auto"              # on, because APP_BASE_URL is https
+      - key: SESSION_COOKIE_SAMESITE
+        value: "Lax"               # correct for the Vercel /api rewrite (same-origin)
+
+# No `databases:` block — the database is Supabase, not Render Postgres. If you
+# ever move it to Render, add one back and switch DATABASE_URL to
+# `fromDatabase: { name: ..., property: connectionString }`.

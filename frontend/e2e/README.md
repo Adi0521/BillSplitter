@@ -11,6 +11,8 @@ Each file drives the real app in Chrome:
 - `receipt-parse.e2e.mjs` — Phase 5: the receipt uploader, an HTML receipt
   whose items deliberately do not match its printed total (so the cross-check
   fires), the unmatched coupon line, and a refused PDF.
+- `csv-export.e2e.mjs` — Phase 7: downloads the CSV through the browser and
+  asserts the rows, including that an unallocated item still gets one.
 - `summary-payments-share.e2e.mjs` — Phase 6: the split summary, recording a
   payment, and the public share view **in a session-free browser context** —
   which is how it proves the share page needs no account, sets no cookies, and

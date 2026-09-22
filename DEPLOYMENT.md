@@ -5,7 +5,7 @@ Two pieces, and they must go to different kinds of host:
 | Piece | What it is | Where it goes |
 |---|---|---|
 | `frontend/` | A Vite-built static SPA | Vercel, Netlify, Cloudflare Pages, any static host |
-| `backend/` | A long-running C++ process | A **container** host — Fly.io, Railway, Render, a VPS |
+| `backend/` | A long-running C++ process | A **container** host — this repo is set up for **Render** (`render.yaml`) |
 | database | PostgreSQL 13+ | Managed Postgres, ideally beside the backend |
 
 **The backend cannot run on Vercel.** It is not a serverless function: it keeps a
@@ -47,29 +47,54 @@ reason, so CI builds the same toolchain that ships. **Check the libpqxx version
 before changing either base image** — the 7.8 failure in particular is easy to
 misread, because `pqxx::params` resolves fine and only the overload is missing.
 
-## Backend
+## Backend on Render
 
-Build from the **repository root**, not from `backend/`:
+[render.yaml](render.yaml) declares the web service. The database is Supabase
+(any Postgres works; see below), so `DATABASE_URL` is entered by hand:
 
-```bash
-docker build -f backend/Dockerfile -t billsplitter-backend .
-docker run -p 8080:8080 \
-  -e DATABASE_URL="postgresql://user:pass@host:5432/db?sslmode=require" \
-  -e APP_BASE_URL="https://your-frontend.example.com" \
-  billsplitter-backend
-```
+1. Push the repo to GitHub (Render deploys from it).
+2. Render dashboard → **New → Blueprint** → select the repo. It reads
+   `render.yaml` and creates `billsplitter-backend`.
+3. It will prompt for the two values it cannot infer:
+   - **`DATABASE_URL`** — Supabase → Project Settings → Database → Connection
+     string → **Transaction pooler** (port 6543), with your password filled in
+     and `?sslmode=require` appended. **Not** the direct connection: on the free
+     tier that is IPv6-only and Render does not guarantee IPv6 egress. And not
+     the `https://<ref>.supabase.co` URL — that is Supabase's REST API, which
+     this backend never uses.
+   - **`APP_BASE_URL`** — your Vercel URL (`https://...`). Guess it now and
+     correct it after the frontend is up; it only needs to be https so the
+     cookie is `Secure`.
+4. Wait for the first build. It compiles C++ with FetchContent, so expect
+   several minutes; later builds cache the dependency clones.
+5. Run migrations once. From the service's **Shell** tab, or from your machine
+   using the database's *external* connection string from the dashboard:
+   ```bash
+   DATABASE_URL="postgresql://...?sslmode=require" ./scripts/migrate.sh
+   ```
+6. Confirm `https://<your-service>.onrender.com/api/health` returns
+   `{"status":"ok"}`.
 
-The image is ~139 MB, runs as an unprivileged `billsplitter` user, and carries a
-`HEALTHCHECK` on `/api/health`. That endpoint touches no database on purpose:
-it reports "this process is serving", so a database outage does not cause your
-platform to cycle an otherwise healthy container.
+### What the free tier means for this app
 
-Run migrations once per environment, from anywhere with `psql` and network
-access to the database:
+- **Spin-down.** A free service stops after ~15 minutes idle and cold-starts on
+  the next request, which takes tens of seconds. This app builds its database
+  pool and OCR engines lazily, so a cold start is one slow first request, not
+  an error — but the login throttle and the hourly session sweep restart with
+  the process. Fine for personal use; not for something people rely on.
+- **512 MB.** `render.yaml` sets `BILLSPLITTER_OCR_POOL=1`. Each Tesseract
+  engine holds a language model; four would not fit. Two receipts uploaded at
+  the same instant queue behind one engine rather than running in parallel.
+- **Supabase free tier pauses inactive projects** after a period without
+  activity (check the current policy); the dashboard shows a resume button.
+  The backend's lazy connection pool copes — a paused database surfaces as a
+  failed request, not a crashed process — but it is worth knowing.
+- Render's proxy caps request bodies well above our 10 MB, so the
+  "request body size" limitation in the README still applies.
 
-```bash
-DATABASE_URL="postgresql://..." ./scripts/migrate.sh
-```
+The Docker `HEALTHCHECK` is ignored by Render; `healthCheckPath: /api/health`
+in the Blueprint is what it uses. Render injects `PORT=10000`, which the app
+reads — the Dockerfile's `PORT=8080` is only a default.
 
 ### Environment
 
@@ -97,10 +122,12 @@ Have the frontend host proxy `/api/*` to the backend. On Vercel, `vercel.json`:
 ```json
 {
   "rewrites": [
-    { "source": "/api/:path*", "destination": "https://your-backend.fly.dev/api/:path*" }
+    { "source": "/api/:path*", "destination": "https://billsplitter-backend.onrender.com/api/:path*" }
   ]
 }
 ```
+That file already exists at the repo root with an SPA fallback rule as well —
+just replace the host with the one Render assigned.
 
 Leave `VITE_API_BASE_URL` unset. The browser sees one origin, so:
 
@@ -115,7 +142,7 @@ together, and getting one wrong fails silently** — login appears to succeed an
 every request afterwards looks logged out, because the browser quietly declines
 to send the cookie:
 
-1. Frontend build: `VITE_API_BASE_URL=https://your-backend.fly.dev/api`
+1. Frontend build: `VITE_API_BASE_URL=https://<your-service>.onrender.com/api`
 2. Backend: `SESSION_COOKIE_SAMESITE=None` (this forces `Secure`, so HTTPS only)
 3. Backend: `APP_BASE_URL` set to the frontend's exact origin — CORS with
    credentials is never honoured against a wildcard

@@ -1,0 +1,6 @@
+# The build context is backend/. Keep the local build tree and secrets out.
+build/
+.env
+*.o
+*.d
+.DS_Store

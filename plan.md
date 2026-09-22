@@ -500,7 +500,9 @@ cd frontend && npm install && npm run dev
 
 ### Phase 7 — Export & Currency
 - [ ] PDF export endpoint (server-side)
-- [ ] CSV export endpoint
+- [x] CSV export endpoint — a flat, pivotable table of items and allocations.
+      Deliberately excludes balances/settlements: those come from
+      `/summary`, and a second implementation of that money could drift.
 - [ ] FX rate fetcher service + daily refresh background thread
 - [ ] Currency selector in split/bill creation
 

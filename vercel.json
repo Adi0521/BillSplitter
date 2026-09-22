@@ -1,0 +1,26 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+
+  "//": [
+    "Set the project's Root Directory to `frontend` in the Vercel dashboard —",
+    "that is a project setting, not something this file can express.",
+    "",
+    "REPLACE the destination host below with the URL Render assigns your service",
+    "(shown on its dashboard page). Keeping /api same-origin is what lets the",
+    "session cookie work under SameSite=Lax with no CORS; see DEPLOYMENT.md."
+  ],
+
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://billsplitter-h2rr.onrender.com/api/:path*"
+    },
+    {
+      "//": "SPA fallback. Static files are matched before rewrites, so this",
+      "//2": "does not shadow the built assets — it only catches client routes",
+      "//3": "like /splits/<id>/summary on a hard refresh.",
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}

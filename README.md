@@ -205,6 +205,7 @@ Implemented today:
 | POST | `/api/splits/:id/payments` | Record that money moved |
 | DELETE | `/api/splits/:id/payments/:pid` | Delete a payment record |
 | POST | `/api/splits/:id/bills/parse` | Upload a receipt image/HTML, get an unsaved draft |
+| GET | `/api/splits/:id/export/csv` | Flat CSV of items and allocations |
 | GET | `/api/splits/share/:token` | **Public**, no auth — read-only split view |
 | POST | `/api/splits/:id/share/regenerate` | New share token; old link stops working |
 

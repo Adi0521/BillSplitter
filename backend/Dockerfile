@@ -1,11 +1,16 @@
 # syntax=docker/dockerfile:1
 #
-# Build from the REPOSITORY ROOT, not from backend/:
-#     docker build -f backend/Dockerfile -t billsplitter-backend .
+# Build context is THIS directory (backend/), which is what every platform
+# defaults to when the Dockerfile lives here:
+#     docker build -t billsplitter-backend ./backend
 #
-# The context is the root because the unit-test target globs ../tests/unit
-# relative to backend/CMakeLists.txt, and a Dockerfile cannot COPY from outside
-# its context.
+# An earlier version used the repo root as context so it could copy tests/unit
+# into the image and run the C++ unit tests during the build. That broke on
+# Render, which (like most hosts) defaults the context to the Dockerfile's own
+# directory, and it failed obscurely — every COPY "not found" against a 2-byte
+# context. The unit tests run in CI on every push, so the image build does not
+# need to repeat them, and a Dockerfile that works with default settings
+# everywhere is worth more than that duplication.
 
 # ── Build stage ───────────────────────────────────────────────────────────────
 # Crow, nlohmann/json and doctest arrive via FetchContent, so the builder needs
@@ -23,11 +28,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
-COPY backend/CMakeLists.txt ./
-COPY backend/include ./include
-COPY backend/src ./src
-# ../tests/unit relative to /src — the path backend/CMakeLists.txt globs.
-COPY tests/unit /tests/unit
+COPY CMakeLists.txt ./
+COPY include ./include
+COPY src ./src
+# tests/unit is deliberately not copied: CMakeLists.txt globs ../tests/unit and
+# simply builds no unit-test target when it is absent. CI runs those tests.
 
 # Warnings fail the image. They are how the small mistakes in this codebase have
 # surfaced, and a container build is the last place to start tolerating them.
@@ -41,10 +46,6 @@ RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
  && if grep "warning:" /tmp/build.log | grep -vE "/build/_deps/" | grep .; then \
       echo "build produced warnings in first-party code"; exit 1; \
     fi
-
-# Run the C++ unit tests during the build, so a broken parser cannot be shipped.
-# The API integration tests need a database and run in CI, not here.
-RUN ./build/unit-tests
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 # Same base as the builder so shared-library ABIs match. Runtime libraries only:

@@ -12,7 +12,9 @@ import axios from 'axios'
 // cross-origin, so the backend must also run with SESSION_COOKIE_SAMESITE=None
 // and APP_BASE_URL set to this site's origin, or the browser will refuse to
 // send the cookie and every request will look logged out. See DEPLOYMENT.md.
-const baseURL = import.meta.env.VITE_API_BASE_URL || '/api'
+export const apiBaseURL = import.meta.env.VITE_API_BASE_URL || '/api'
+
+const baseURL = apiBaseURL
 
 const api = axios.create({
   baseURL,
