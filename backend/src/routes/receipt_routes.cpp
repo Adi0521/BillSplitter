@@ -246,17 +246,18 @@ void register_receipt_routes(BsApp& app, DbPool& pool) {
 
             if (!is_uuid(split_id)) return json_error(404, "Split not found");
 
-            // Ownership and the split's currency come out of one query, and
-            // ownership is scoped into the WHERE clause: another user's split
-            // yields no rows, so it is indistinguishable from one that does
-            // not exist. Nesting under /api/splits/<id>/ proves nothing.
+            // Access and the split's currency come out of one query, and access
+            // is scoped into the WHERE clause via split_role(): a split the caller
+            // neither owns nor is a member of yields no rows, so it is
+            // indistinguishable from one that does not exist. Nesting under
+            // /api/splits/<id>/ proves nothing.
             std::string currency;
             {
                 auto conn = pool.acquire();
                 pqxx::work txn(*conn);
                 auto rows = txn.exec(
                     "SELECT currency FROM splits "
-                    " WHERE id = $1::uuid AND owner_id = $2::uuid",
+                    " WHERE id = $1::uuid AND split_role(id, $2::uuid) IS NOT NULL",
                     pqxx::params{split_id, user->id});
                 txn.commit();
                 if (rows.empty()) return json_error(404, "Split not found");

@@ -14,7 +14,8 @@ import unittest
 import uuid
 from urllib.parse import quote
 
-from harness import BAD_IDS, MISSING_UUID, ApiTestCase, Client, new_user
+from harness import (BAD_IDS, MISSING_UUID, ApiTestCase, Client,
+                     make_collaborator, new_user)
 
 
 def as_path_id(value):
@@ -25,7 +26,7 @@ def as_path_id(value):
 
 
 SPLIT_KEYS = {"id", "name", "description", "type", "currency", "share_token",
-              "created_at", "archived_at", "member_count"}
+              "created_at", "archived_at", "member_count", "role"}
 
 
 class TestCreateSplit(ApiTestCase, unittest.TestCase):
@@ -40,6 +41,15 @@ class TestCreateSplit(ApiTestCase, unittest.TestCase):
         self.assertEqual(r.json["type"], "one_time")
         self.assertTrue(r.json["share_token"], "share_token must be populated")
         self.assertTrue(r.json["created_at"])
+        self.assertEqual(r.json["role"], "owner", "the creator's relationship is owner")
+
+    def test_role_is_owner_on_list_detail_and_put_for_the_creator(self):
+        c = new_user()
+        split = c.make_split()
+        self.assertEqual(c.get(f"/api/splits/{split['id']}").json["role"], "owner")
+        self.assertEqual(c.put(f"/api/splits/{split['id']}", {"name": "R"}).json["role"], "owner")
+        listed = [s for s in c.get("/api/splits").json if s["id"] == split["id"]][0]
+        self.assertEqual(listed["role"], "owner")
 
     def test_omitted_description_is_the_empty_string_never_null(self):
         c = new_user()
@@ -393,6 +403,83 @@ class TestSplitOwnership(ApiTestCase, unittest.TestCase):
         self.assertError(anon.get(f"/api/splits/{self.split['id']}"), 401)
         self.assertError(anon.put(f"/api/splits/{self.split['id']}", {"name": "x"}), 401)
         self.assertError(anon.delete(f"/api/splits/{self.split['id']}"), 401)
+
+
+class TestCollaborator(ApiTestCase, unittest.TestCase):
+    """A linked member reads and edits the split exactly as the owner does;
+    archiving is the one split-level action that stays with the owner and
+    answers a member with 403. TestSplitOwnership above is unchanged: a
+    stranger's split_role() is NULL, and NULL is still 404 everywhere — a
+    stranger must not learn a split exists by being refused permission to
+    archive it."""
+
+    def setUp(self):
+        self.owner = new_user(display_name="Alice")
+        self.split = self.owner.make_split(name="Shared trip", currency="EUR")
+        self.collab, self.seat = make_collaborator(self.owner, self.split["id"], name="Bob")
+
+    def test_the_split_is_in_the_members_list_tagged_role_member(self):
+        r = self.collab.get("/api/splits")
+        self.assertStatus(r, 200)
+        by_id = {s["id"]: s for s in r.json}
+        self.assertIn(self.split["id"], by_id)
+        self.assertEqual(by_id[self.split["id"]]["role"], "member")
+        self.assertTrue(SPLIT_KEYS.issubset(by_id[self.split["id"]].keys()))
+        # The same row is "owner" from the other side of the table.
+        mine = {s["id"]: s for s in self.owner.get("/api/splits").json}
+        self.assertEqual(mine[self.split["id"]]["role"], "owner")
+
+    def test_a_member_can_get_the_detail_with_the_members_embedded(self):
+        r = self.collab.get(f"/api/splits/{self.split['id']}")
+        self.assertStatus(r, 200)
+        self.assertEqual(r.json["role"], "member")
+        self.assertEqual(r.json["name"], "Shared trip")
+        names = sorted(m["name"] for m in r.json["members"])
+        self.assertEqual(names, ["Alice", "Bob"])
+        own_seat = [m for m in r.json["members"] if m["id"] == self.seat["id"]][0]
+        self.assertTrue(own_seat["linked"])
+        self.assertFalse(own_seat["is_owner"])
+        # Detail differs from the owner's view only in the role field.
+        mine = self.owner.get(f"/api/splits/{self.split['id']}").json
+        theirs = dict(r.json)
+        mine.pop("role"); theirs.pop("role")
+        self.assertEqual(theirs, mine)
+
+    def test_a_member_can_put_and_the_owner_sees_the_change(self):
+        r = self.collab.put(f"/api/splits/{self.split['id']}",
+                            {"name": "Renamed by Bob", "currency": "gbp"})
+        self.assertStatus(r, 200)
+        self.assertEqual(r.json["name"], "Renamed by Bob")
+        self.assertEqual(r.json["currency"], "GBP")
+        self.assertEqual(r.json["role"], "member")
+        self.assertEqual(self.owner.get(f"/api/splits/{self.split['id']}").json["name"],
+                         "Renamed by Bob")
+
+    def test_put_validation_does_not_depend_on_role(self):
+        self.assertError(self.collab.put(f"/api/splits/{self.split['id']}", {}), 400)
+        self.assertError(self.collab.put(f"/api/splits/{self.split['id']}",
+                                         {"currency": "US1"}), 400)
+
+    def test_a_member_archiving_is_403_and_the_split_stays_live(self):
+        r = self.collab.delete(f"/api/splits/{self.split['id']}")
+        self.assertError(r, 403)
+        self.assertIsNone(self.owner.get(f"/api/splits/{self.split['id']}").json["archived_at"],
+                          "a 403 must not have archived anything")
+
+    def test_a_member_sees_an_archived_split_only_with_the_archived_flag(self):
+        self.assertStatus(self.owner.delete(f"/api/splits/{self.split['id']}"), 200)
+        self.assertNotIn(self.split["id"], [s["id"] for s in self.collab.get("/api/splits").json])
+        archived = {s["id"]: s for s in self.collab.get("/api/splits?archived=true").json}
+        self.assertIn(self.split["id"], archived)
+        self.assertEqual(archived[self.split["id"]]["role"], "member")
+
+    def test_a_member_is_still_a_stranger_to_the_owners_other_splits(self):
+        other = self.owner.make_split(name="Not shared")
+        self.assertNotIn(other["id"], [s["id"] for s in self.collab.get("/api/splits").json])
+        self.assertError(self.collab.get(f"/api/splits/{other['id']}"), 404)
+        self.assertError(self.collab.put(f"/api/splits/{other['id']}", {"name": "x"}), 404)
+        # No role is 404 even on the owner-only action.
+        self.assertError(self.collab.delete(f"/api/splits/{other['id']}"), 404)
 
 
 class TestMalformedSplitIds(ApiTestCase, unittest.TestCase):

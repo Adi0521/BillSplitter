@@ -182,9 +182,10 @@ bool check_amount_bounds(const std::string& int_part, const std::string& frac_pa
 
 // ── Reading an AllocationSet back out ────────────────────────────────────────
 //
-// $1 = item id, $2 = bill id, $3 = owner id, in every statement in this module.
+// $1 = item id, $2 = bill id, $3 = session user id, in every statement here.
 // The CTE is the authorization: the item is only reachable through a bill on a
-// split this user owns, and only under the bill named in the URL. Zero rows is
+// split this user may touch — split_role() is non-NULL for the owner and for
+// every linked member — and only under the bill named in the URL. Zero rows is
 // the answer for "no such item", "not your item" and "wrong bill" alike.
 const char* TARGET_CTE =
     "WITH target AS ("
@@ -194,7 +195,7 @@ const char* TARGET_CTE =
     "      JOIN splits s ON s.id = b.split_id"
     "     WHERE i.id = $1::uuid"
     "       AND i.bill_id = $2::uuid"
-    "       AND s.owner_id = $3::uuid)";
+    "       AND split_role(s.id, $3::uuid) IS NOT NULL)";
 
 // The share is computed here, in NUMERIC, and nowhere else: ROUND(line_total *
 // ratio / 100, 4) in ratio mode, the stored amount in amount mode.
@@ -245,9 +246,9 @@ json field_or_null(const pqxx::row& r, const char* column) {
 std::optional<json> read_allocation_set(pqxx::work& txn,
                                         const std::string& item_id,
                                         const std::string& bill_id,
-                                        const std::string& owner_id) {
+                                        const std::string& user_id) {
     auto summary = txn.exec(std::string(TARGET_CTE) + ALLOCATION_SUMMARY_SQL,
-                            pqxx::params{item_id, bill_id, owner_id});
+                            pqxx::params{item_id, bill_id, user_id});
     if (summary.empty()) return std::nullopt;
 
     const auto& s = summary[0];
@@ -259,7 +260,7 @@ std::optional<json> read_allocation_set(pqxx::work& txn,
     out["unallocated"]  = s["unallocated"].as<std::string>();
 
     auto rows = txn.exec(std::string(TARGET_CTE) + ALLOCATION_ROWS_SQL,
-                         pqxx::params{item_id, bill_id, owner_id});
+                         pqxx::params{item_id, bill_id, user_id});
     json allocations = json::array();
     for (const auto& r : rows) {
         json a;
@@ -430,11 +431,11 @@ bool parse_member_ids(const json& body, std::vector<std::string>& out,
     return true;
 }
 
-// Deletes every allocation on an item, re-proving ownership in the statement so
+// Deletes every allocation on an item, re-proving access in the statement so
 // the write is safe on its own terms and not only because an earlier SELECT in
 // this transaction said so.
 void delete_allocations(pqxx::work& txn, const std::string& item_id,
-                        const std::string& bill_id, const std::string& owner_id) {
+                        const std::string& bill_id, const std::string& user_id) {
     txn.exec(
         "DELETE FROM item_allocations"
         "  USING bill_items i, bills b, splits s"
@@ -443,8 +444,8 @@ void delete_allocations(pqxx::work& txn, const std::string& item_id,
         "   AND i.bill_id = $2::uuid"
         "   AND b.id = i.bill_id"
         "   AND s.id = b.split_id"
-        "   AND s.owner_id = $3::uuid",
-        pqxx::params{item_id, bill_id, owner_id});
+        "   AND split_role(s.id, $3::uuid) IS NOT NULL",
+        pqxx::params{item_id, bill_id, user_id});
 }
 
 }  // namespace

@@ -16,7 +16,7 @@ The rules being tested (docs/api.md, Phase 4):
 import unittest
 from decimal import Decimal
 
-from harness import ApiTestCase, BAD_IDS, MISSING_UUID, new_user
+from harness import ApiTestCase, BAD_IDS, MISSING_UUID, make_collaborator, new_user
 
 # BAD_IDS contains a space, which http.client refuses to put in a request line.
 def path_id(raw):
@@ -483,6 +483,104 @@ class TestAllocationBadIds(AllocationCase):
         url = f"/api/bills/{bill['id']}/items/{item['id']}/allocations"
         r = c.request("PUT", url, None)
         self.assertLess(r.status, 500, f"{r}")
+
+
+class TestCollaborator(AllocationCase):
+    """A linked member gets exactly what the owner gets: same codes, same
+    shapes, same numbers. The access predicate is split_role() IS NOT NULL, so
+    'member' and 'owner' are indistinguishable from inside an allocation."""
+
+    def collab_scenario(self, price="10.00", members=2):
+        owner, split, people, bill, item = self.scenario(price=price, members=members)
+        collab, seat = make_collaborator(owner, split["id"], name="Collab")
+        return owner, collab, split, people + [seat], bill, item
+
+    def test_a_member_reads_the_same_allocation_set_as_the_owner(self):
+        owner, collab, split, people, bill, item = self.collab_scenario()
+        r = owner.allocate(bill["id"], item["id"], "ratio",
+                           [{"member_id": people[0]["id"], "ratio": "50"},
+                            {"member_id": people[1]["id"], "ratio": "50"}])
+        self.assertStatus(r, 200)
+        url = f"/api/bills/{bill['id']}/items/{item['id']}/allocations"
+        mine, theirs = owner.get(url), collab.get(url)
+        self.assertStatus(mine, 200)
+        self.assertStatus(theirs, 200)
+        self.assertEqual(mine.body, theirs.body,
+                         "the allocation set must not depend on who is asking")
+
+    def test_a_member_can_put_allocations(self):
+        owner, collab, split, people, bill, item = self.collab_scenario(price="10.00")
+        r = collab.allocate(bill["id"], item["id"], "ratio",
+                            [{"member_id": p["id"], "ratio": "33.3333"} for p in people])
+        self.assertStatus(r, 200)
+        self.assertSetMoney(r.json)
+        self.assertEqual(r.json["mode"], "ratio")
+        self.assertEqual([a["share"] for a in r.json["allocations"]],
+                         ["3.3333", "3.3333", "3.3333"])
+        self.assertEqual(r.json["allocated"], "9.9999")
+        self.assertEqual(r.json["unallocated"], "0.0001")
+        # The owner sees what the member wrote; it is one ledger.
+        owner_view = owner.get(f"/api/bills/{bill['id']}/items/{item['id']}/allocations")
+        self.assertStatus(owner_view, 200)
+        self.assertEqual(owner_view.body, r.body)
+
+    def test_a_member_can_allocate_to_their_own_seat_in_amount_mode(self):
+        owner, collab, split, people, bill, item = self.collab_scenario(price="10.00")
+        seat = people[-1]
+        r = collab.allocate(bill["id"], item["id"], "amount",
+                            [{"member_id": seat["id"], "amount": "4.25"}])
+        self.assertStatus(r, 200)
+        self.assertEqual(self.shares_by_member(r.json), {seat["id"]: "4.2500"})
+        self.assertEqual(r.json["unallocated"], "5.7500")
+
+    def test_a_member_can_post_even_split(self):
+        owner, collab, split, people, bill, item = self.collab_scenario(price="10.00")
+        r = collab.post(f"/api/bills/{bill['id']}/items/{item['id']}/even-split",
+                        {"member_ids": [p["id"] for p in people]})
+        self.assertStatus(r, 200)
+        self.assertSetMoney(r.json)
+        self.assertEqual(r.json["mode"], "amount")
+        self.assertEqual([a["share"] for a in r.json["allocations"]],
+                         ["3.3300", "3.3300", "3.3300"])
+        self.assertEqual(r.json["allocated"], "9.9900")
+        self.assertEqual(r.json["unallocated"], "0.0100")
+
+    def test_a_member_gets_the_same_400s_as_the_owner(self):
+        """Validation does not depend on role: a member is not a stranger, so a
+        bad body is 400 (not 404) exactly as it is for the owner."""
+        owner, collab, split, people, bill, item = self.collab_scenario()
+        url = f"/api/bills/{bill['id']}/items/{item['id']}/allocations"
+        bad = {"mode": "ratio", "allocations": [
+            {"member_id": people[0]["id"], "ratio": "100.0001"}]}
+        mine, theirs = owner.put(url, bad), collab.put(url, bad)
+        self.assertError(mine, 400)
+        self.assertError(theirs, 400)
+        self.assertEqual(mine.json, theirs.json)
+
+    def test_a_member_can_clear_the_set(self):
+        owner, collab, split, people, bill, item = self.collab_scenario()
+        self.assertStatus(owner.allocate(bill["id"], item["id"], "ratio",
+            [{"member_id": people[0]["id"], "ratio": "100"}]), 200)
+        r = collab.allocate(bill["id"], item["id"], "ratio", [])
+        self.assertStatus(r, 200)
+        self.assertEqual(r.json["allocations"], [])
+        self.assertIsNone(r.json["mode"])
+        self.assertEqual(r.json["unallocated"], r.json["line_total"])
+
+    def test_a_member_of_one_split_is_still_a_stranger_to_another(self):
+        """Linking to split A grants nothing on the same owner's split B."""
+        owner, collab, split, people, bill, item = self.collab_scenario()
+        other_split = owner.make_split()
+        other_member = owner.make_member(other_split["id"], "Zed")
+        other_bill = owner.make_bill(other_split["id"])
+        other_item = owner.make_item(other_bill["id"], price="10.00")
+        url = f"/api/bills/{other_bill['id']}/items/{other_item['id']}/allocations"
+        self.assertError(collab.get(url), 404)
+        self.assertError(collab.put(url, {"mode": "ratio", "allocations": [
+            {"member_id": other_member["id"], "ratio": "100"}]}), 404)
+        self.assertError(collab.post(
+            f"/api/bills/{other_bill['id']}/items/{other_item['id']}/even-split",
+            {"member_ids": [other_member["id"]]}), 404)
 
 
 if __name__ == "__main__":

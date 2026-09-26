@@ -170,8 +170,9 @@ std::string today_utc() {
 // would silently drop exactly the rows the export exists to surface — what
 // nobody is on the hook for.
 //
-// Ownership is scoped into the query. Another user's split matches no rows, and
-// the caller cannot tell it apart from one that does not exist.
+// Access is scoped into the query via split_role(): a split the caller neither
+// owns nor is a member of matches no rows, and the caller cannot tell it apart
+// from one that does not exist.
 //
 // `share` is the same expression share_routes.cpp uses, evaluated by Postgres
 // in NUMERIC: ROUND(line_total * ratio / 100, 4) in ratio mode, the stored
@@ -202,7 +203,7 @@ const char* const EXPORT_SQL =
     "  LEFT JOIN bill_items i       ON i.bill_id = b.id "
     "  LEFT JOIN item_allocations a ON a.bill_item_id = i.id "
     "  LEFT JOIN split_members m    ON m.id = a.member_id "
-    " WHERE s.id = $1::uuid AND s.owner_id = $2::uuid "
+    " WHERE s.id = $1::uuid AND split_role(s.id, $2::uuid) IS NOT NULL "
     " ORDER BY b.date, b.created_at, b.id, i.created_at, i.id, m.name, m.id";
 
 const char* const CSV_HEADER =
@@ -231,12 +232,12 @@ void register_export_routes(BsApp& app, DbPool& pool) {
             pqxx::work txn(*conn);
 
             // Resolved separately from the export query because a split that is
-            // owned but empty must return a header-only CSV, while a split that
-            // is missing or owned by somebody else must return 404. The export
-            // query alone returns no rows in both cases.
+            // accessible but empty must return a header-only CSV, while a split
+            // that is missing or not the caller's (split_role NULL) must return 404.
+            // The export query alone returns no rows in both cases.
             auto owned = txn.exec(
                 "SELECT name FROM splits "
-                " WHERE id = $1::uuid AND owner_id = $2::uuid",
+                " WHERE id = $1::uuid AND split_role(id, $2::uuid) IS NOT NULL",
                 pqxx::params{id, user->id});
             if (owned.empty()) {
                 txn.commit();

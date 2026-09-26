@@ -12,7 +12,7 @@ representation exists to prevent.
 import unittest
 from decimal import Decimal
 
-from harness import ApiTestCase, BAD_IDS, MISSING_UUID, new_user
+from harness import ApiTestCase, BAD_IDS, MISSING_UUID, make_collaborator, new_user
 
 # BAD_IDS contains a space, and http.client refuses to put a raw space in a
 # request line (InvalidURL, raised before the request is ever sent). Encoding
@@ -434,6 +434,80 @@ class TestBillOwnership(BillCase):
         self.assertError(anon.get(f"/api/splits/{split['id']}/bills"), 401)
         self.assertError(
             anon.get(f"/api/splits/{split['id']}/bills/{bill['id']}"), 401)
+
+
+
+class TestCollaborator(BillCase):
+    """A linked member is not a second-class participant: every bill endpoint
+    answers a collaborator exactly as it answers the owner. The stranger tests
+    above still hold — split_role() is NULL for them, and NULL is still 404."""
+
+    def setUp(self):
+        self.owner = new_user()
+        self.split = self.owner.make_split(currency="EUR")
+        self.collab, self.seat = make_collaborator(self.owner, self.split["id"])
+
+    def test_collaborator_can_list_and_read_the_owners_bills(self):
+        bill = self.owner.make_bill(self.split["id"], store_name="Safeway")
+        self.owner.make_item(bill["id"], name="Olive oil", price="12.50", quantity=2)
+
+        listing = self.collab.get(f"/api/splits/{self.split['id']}/bills")
+        self.assertStatus(listing, 200)
+        self.assertIsInstance(listing.json, list)
+        self.assertEqual([b["id"] for b in listing.json], [bill["id"]])
+
+        mine = self.owner.get(f"/api/splits/{self.split['id']}/bills/{bill['id']}")
+        theirs = self.collab.get(f"/api/splits/{self.split['id']}/bills/{bill['id']}")
+        self.assertStatus(theirs, 200)
+        self.assertBillMoney(theirs.json)
+        # Byte-for-byte the same view of the same bill.
+        self.assertEqual(theirs.json, mine.json)
+        self.assertEqual(theirs.json["subtotal"], "25.0000")
+
+    def test_collaborator_can_create_a_bill_that_inherits_the_split_currency(self):
+        r = self.collab.post(f"/api/splits/{self.split['id']}/bills",
+                             {"store_name": "Lidl", "date": "2026-02-01",
+                              "payer_member_id": self.seat["id"]})
+        self.assertStatus(r, 201)
+        self.assertBillMoney(r.json)
+        self.assertEqual(r.json["split_id"], self.split["id"])
+        self.assertEqual(r.json["currency"], "EUR")
+        self.assertEqual(r.json["payer_member_id"], self.seat["id"])
+        # The owner sees what the collaborator added.
+        ids = [b["id"] for b in self.owner.get(f"/api/splits/{self.split['id']}/bills").json]
+        self.assertIn(r.json["id"], ids)
+
+    def test_collaborator_can_update_and_delete(self):
+        bill = self.owner.make_bill(self.split["id"], store_name="Safeway", tax="3.00")
+        detail = f"/api/splits/{self.split['id']}/bills/{bill['id']}"
+
+        r = self.collab.put(detail, {"store_name": "Trader Joe's"})
+        self.assertStatus(r, 200)
+        self.assertEqual(r.json["store_name"], "Trader Joe's")
+        self.assertEqual(r.json["tax"], "3.0000")
+        self.assertEqual(self.owner.get(detail).json["store_name"], "Trader Joe's")
+
+        # Validation is the same too: a bad update is 400, not 404, because the
+        # collaborator has proven they may see the bill.
+        self.assertError(self.collab.put(detail, {"date": "2026-02-31"}), 400)
+        self.assertError(self.collab.put(detail, {}), 400)
+
+        self.assertStatus(self.collab.delete(detail), 200)
+        self.assertError(self.owner.get(detail), 404)
+        self.assertError(self.collab.get(detail), 404)
+
+    def test_collaborator_is_still_a_stranger_to_the_owners_other_splits(self):
+        """Membership is per split. Being linked into one split grants nothing
+        on another split of the same owner: still 404, never 403."""
+        other = self.owner.make_split()
+        bill = self.owner.make_bill(other["id"])
+        self.assertError(self.collab.get(f"/api/splits/{other['id']}/bills"), 404)
+        self.assertError(self.collab.post(f"/api/splits/{other['id']}/bills",
+                                          {"store_name": "S", "date": "2026-01-15"}), 404)
+        self.assertError(
+            self.collab.get(f"/api/splits/{other['id']}/bills/{bill['id']}"), 404)
+        self.assertError(
+            self.collab.delete(f"/api/splits/{other['id']}/bills/{bill['id']}"), 404)
 
 
 class TestBillBadIds(BillCase):

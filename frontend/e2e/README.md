@@ -11,6 +11,10 @@ Each file drives the real app in Chrome:
 - `receipt-parse.e2e.mjs` — Phase 5: the receipt uploader, an HTML receipt
   whose items deliberately do not match its printed total (so the cross-check
   fires), the unmatched coupon line, and a refused PDF.
+- `invites.e2e.mjs` — collaboration: the owner mints an invite link through
+  the UI; a **brand-new, signed-out** user opens it, is sent to sign up, lands
+  back on the invite, joins, and sees the split under Invited with member-only
+  controls; a third user replaying the link gets the not-valid page.
 - `csv-export.e2e.mjs` — Phase 7: downloads the CSV through the browser and
   asserts the rows, including that an unallocated item still gets one.
 - `summary-payments-share.e2e.mjs` — Phase 6: the split summary, recording a

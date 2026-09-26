@@ -535,11 +535,12 @@ void register_public_routes(BsApp& app, DbPool& pool) {
 
     // ── POST /api/splits/<id>/share/regenerate ───────────────────────────────
     //
-    // Owner only; a non-owner gets the same 404 as a nonexistent split. The new
-    // token replaces the old one in place, so the previous link stops resolving
-    // the moment this commits — there is no grace period and no second valid
-    // token. Archived splits can still be regenerated: revoking a link that was
-    // shared before archiving is exactly when an owner wants this.
+    // Owner only: a member gets 403 (they have already proven they can see the
+    // split) and anyone with no role gets the same 404 as a nonexistent split.
+    // The new token replaces the old one in place, so the previous link stops
+    // resolving the moment this commits — there is no grace period and no
+    // second valid token. Archived splits can still be regenerated: revoking a
+    // link that was shared before archiving is exactly when an owner wants this.
     CROW_ROUTE(app, "/api/splits/<string>/share/regenerate")
         .methods(crow::HTTPMethod::POST)
     ([&pool](const crow::request& req, const std::string& id) {
@@ -562,21 +563,33 @@ void register_public_routes(BsApp& app, DbPool& pool) {
             for (int attempt = 0; attempt < 3; ++attempt) {
                 try {
                     pqxx::work txn(*conn);
+                    // The role and the write are one statement: the UPDATE
+                    // only fires when the role computed in `target` is
+                    // 'owner', and the role comes back so 403 and 404 can be
+                    // told apart without a second query.
                     auto rows = txn.exec(
-                        "UPDATE splits "
-                        "   SET share_token = encode(gen_random_bytes(16), 'hex') "
-                        " WHERE id = $1::uuid AND owner_id = $2::uuid "
-                        " RETURNING share_token",
+                        "WITH target AS ("
+                        "    SELECT s.id, split_role(s.id, $2::uuid) AS role"
+                        "      FROM splits s WHERE s.id = $1::uuid"
+                        "), regenerated AS ("
+                        "    UPDATE splits s"
+                        "       SET share_token = encode(gen_random_bytes(16), 'hex')"
+                        "      FROM target t WHERE s.id = t.id AND t.role = 'owner'"
+                        "    RETURNING s.share_token"
+                        ") SELECT t.role, (SELECT share_token FROM regenerated)"
+                        "    FROM target t",
                         pqxx::params{id, user->id});
-
-                    if (rows.empty()) {
-                        txn.commit();
-                        return json_error(404, "Split not found");
-                    }
                     txn.commit();
 
+                    if (rows.empty() || rows[0][0].is_null()) {
+                        return json_error(404, "Split not found");
+                    }
+                    if (rows[0][0].as<std::string>() != "owner") {
+                        return json_error(403, "Only the owner can regenerate the share link");
+                    }
+
                     res.code = 200;
-                    res.body = json({{"share_token", rows[0][0].as<std::string>()}}).dump();
+                    res.body = json({{"share_token", rows[0][1].as<std::string>()}}).dump();
                     return res;
                 } catch (const pqxx::unique_violation& e) {
                     CROW_LOG_WARNING << "public_routes: share_token collision, retrying: "

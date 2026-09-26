@@ -116,10 +116,16 @@ bool validate_currency(std::string& currency, std::string& err) {
 // Column list shared by every query that returns a Split, so the positional
 // indices used by split_to_json() are identical everywhere. member_count comes
 // from a correlated subquery rather than a follow-up query per split.
-const char* const SPLIT_COLUMNS =
-    "s.id, s.name, COALESCE(s.description, ''), s.type, s.currency, "
-    "s.share_token, s.created_at, s.archived_at, "
-    "(SELECT COUNT(*) FROM split_members m WHERE m.split_id = s.id)";
+//
+// `role_expr` is the SQL expression for the caller's relationship to the split
+// — normally `split_role(s.id, $n::uuid)`, but a literal 'owner' on create,
+// where the function would not yet see the row being inserted.
+std::string split_columns(const std::string& role_expr) {
+    return "s.id, s.name, COALESCE(s.description, ''), s.type, s.currency, "
+           "s.share_token, s.created_at, s.archived_at, "
+           "(SELECT COUNT(*) FROM split_members m WHERE m.split_id = s.id), " +
+           role_expr;
+}
 
 json split_to_json(const pqxx::row& r) {
     json j;
@@ -133,17 +139,28 @@ json split_to_json(const pqxx::row& r) {
     j["archived_at"]  = r[7].is_null() ? json(nullptr)
                                        : json(r[7].as<std::string>());
     j["member_count"] = r[8].as<long long>();
+    j["role"]         = r[9].as<std::string>();
     return j;
 }
 
+// Member columns as embedded in SplitDetail. The invite token is deliberately
+// absent: it is a secret returned exactly once, by the endpoint that mints it.
+const char* const MEMBER_COLUMNS =
+    "m.id, m.split_id, m.user_id, m.name, m.email, m.joined_at, "
+    "m.user_id IS NOT NULL, m.invite_token IS NOT NULL, "
+    "COALESCE(m.user_id = s.owner_id, false)";
+
 json member_to_json(const pqxx::row& r) {
     json j;
-    j["id"]        = r[0].as<std::string>();
-    j["split_id"]  = r[1].as<std::string>();
-    j["user_id"]   = r[2].is_null() ? json(nullptr) : json(r[2].as<std::string>());
-    j["name"]      = r[3].as<std::string>();
-    j["email"]     = r[4].is_null() ? json(nullptr) : json(r[4].as<std::string>());
-    j["joined_at"] = r[5].as<std::string>();
+    j["id"]             = r[0].as<std::string>();
+    j["split_id"]       = r[1].as<std::string>();
+    j["user_id"]        = r[2].is_null() ? json(nullptr) : json(r[2].as<std::string>());
+    j["name"]           = r[3].as<std::string>();
+    j["email"]          = r[4].is_null() ? json(nullptr) : json(r[4].as<std::string>());
+    j["joined_at"]      = r[5].as<std::string>();
+    j["linked"]         = r[6].as<bool>();
+    j["invite_pending"] = r[7].as<bool>();
+    j["is_owner"]       = r[8].as<bool>();
     return j;
 }
 
@@ -152,7 +169,8 @@ json member_to_json(const pqxx::row& r) {
 void register_split_routes(BsApp& app, DbPool& pool) {
 
     // ── GET /api/splits ──────────────────────────────────────────────────────
-    // Owned splits, newest first. Archived splits are excluded unless
+    // Every split the caller can access — owned or joined — newest first, each
+    // tagged with the caller's role. Archived splits are excluded unless
     // ?archived=true is passed.
     CROW_ROUTE(app, "/api/splits").methods(crow::HTTPMethod::GET)
     ([&pool](const crow::request& req) {
@@ -170,8 +188,8 @@ void register_split_routes(BsApp& app, DbPool& pool) {
                  std::string(archived_param) == "1");
 
             const std::string sql =
-                std::string("SELECT ") + SPLIT_COLUMNS +
-                " FROM splits s WHERE s.owner_id = $1::uuid" +
+                "SELECT " + split_columns("split_role(s.id, $1::uuid)") +
+                " FROM splits s WHERE split_role(s.id, $1::uuid) IS NOT NULL" +
                 (include_archived ? "" : " AND s.archived_at IS NULL") +
                 " ORDER BY s.created_at DESC";
 
@@ -237,19 +255,22 @@ void register_split_routes(BsApp& app, DbPool& pool) {
             pqxx::work txn(*conn);
 
             // NULLIF stores an omitted/empty description as NULL; it reads back
-            // as "" through the COALESCE in SPLIT_COLUMNS.
+            // as "" through the COALESCE in the column list. The role is the
+            // literal 'owner': the caller just created the row.
             auto inserted = txn.exec(
-                std::string("INSERT INTO splits AS s "
-                            "  (owner_id, name, description, type, currency) "
-                            "  VALUES ($1::uuid, $2, NULLIF($3, ''), $4, $5) "
-                            "  RETURNING ") + SPLIT_COLUMNS,
+                "INSERT INTO splits AS s "
+                "  (owner_id, name, description, type, currency) "
+                "  VALUES ($1::uuid, $2, NULLIF($3, ''), $4, $5) "
+                "  RETURNING " + split_columns("'owner'::text"),
                 pqxx::params{user->id, name, description, type, currency});
 
             const std::string split_id = inserted[0][0].as<std::string>();
 
+            // The owner's seat is linked from birth: user_id AND linked_at are
+            // set together so a linked row never has a NULL linked_at.
             txn.exec(
-                "INSERT INTO split_members (split_id, user_id, name) "
-                "  VALUES ($1::uuid, $2::uuid, $3)",
+                "INSERT INTO split_members (split_id, user_id, name, linked_at) "
+                "  VALUES ($1::uuid, $2::uuid, $3, now())",
                 pqxx::params{split_id, user->id, member_name});
 
             // Re-read the count now that the owner-member exists; the RETURNING
@@ -276,7 +297,7 @@ void register_split_routes(BsApp& app, DbPool& pool) {
     });
 
     // ── GET /api/splits/<id> ─────────────────────────────────────────────────
-    // Returns a SplitDetail: the Split plus its "members" array.
+    // Returns a SplitDetail: the Split plus its "members" array. Any role.
     CROW_ROUTE(app, "/api/splits/<string>").methods(crow::HTTPMethod::GET)
     ([&pool](const crow::request& req, const std::string& id) {
         crow::response res;
@@ -291,11 +312,12 @@ void register_split_routes(BsApp& app, DbPool& pool) {
             auto conn = pool.acquire();
             pqxx::work txn(*conn);
 
-            // Ownership is scoped into the query: a split owned by someone else
-            // returns no rows, hence 404 rather than 403.
+            // Access is scoped into the query: a split the caller has no role
+            // in returns no rows, hence 404 rather than 403.
             auto rows = txn.exec(
-                std::string("SELECT ") + SPLIT_COLUMNS +
-                " FROM splits s WHERE s.id = $1::uuid AND s.owner_id = $2::uuid",
+                "SELECT " + split_columns("split_role(s.id, $2::uuid)") +
+                " FROM splits s WHERE s.id = $1::uuid"
+                "   AND split_role(s.id, $2::uuid) IS NOT NULL",
                 pqxx::params{id, user->id});
 
             if (rows.empty()) {
@@ -304,9 +326,10 @@ void register_split_routes(BsApp& app, DbPool& pool) {
             }
 
             auto members = txn.exec(
-                "SELECT id, split_id, user_id, name, email, joined_at "
-                "  FROM split_members WHERE split_id = $1::uuid "
-                "  ORDER BY joined_at ASC",
+                std::string("SELECT ") + MEMBER_COLUMNS +
+                "  FROM split_members m JOIN splits s ON s.id = m.split_id"
+                " WHERE m.split_id = $1::uuid"
+                " ORDER BY m.joined_at ASC",
                 pqxx::params{id});
             txn.commit();
 
@@ -326,7 +349,7 @@ void register_split_routes(BsApp& app, DbPool& pool) {
 
     // ── PUT /api/splits/<id> ─────────────────────────────────────────────────
     // Body: any subset of { name, description, type, currency }. Omitted fields
-    // are left unchanged; an empty body is a 400.
+    // are left unchanged; an empty body is a 400. Any role may edit.
     CROW_ROUTE(app, "/api/splits/<string>").methods(crow::HTTPMethod::PUT)
     ([&pool](const crow::request& req, const std::string& id) {
         crow::response res;
@@ -391,16 +414,17 @@ void register_split_routes(BsApp& app, DbPool& pool) {
                 set_clause += assignments[i];
             }
 
-            const std::string id_param    = "$" + std::to_string(n++);
-            const std::string owner_param = "$" + std::to_string(n++);
+            const std::string id_param   = "$" + std::to_string(n++);
+            const std::string user_param = "$" + std::to_string(n++);
             params.append(id);
             params.append(user->id);
 
+            const std::string role_expr = "split_role(s.id, " + user_param + "::uuid)";
             const std::string sql =
                 "UPDATE splits AS s SET " + set_clause +
                 " WHERE s.id = " + id_param + "::uuid" +
-                " AND s.owner_id = " + owner_param + "::uuid" +
-                " RETURNING " + SPLIT_COLUMNS;
+                " AND " + role_expr + " IS NOT NULL" +
+                " RETURNING " + split_columns(role_expr);
 
             auto conn = pool.acquire();
             pqxx::work txn(*conn);
@@ -424,6 +448,10 @@ void register_split_routes(BsApp& app, DbPool& pool) {
     // ── DELETE /api/splits/<id> ──────────────────────────────────────────────
     // Archives the split (sets archived_at); rows are never deleted. Archiving
     // an already-archived split is a no-op that still returns 200.
+    //
+    // Owner-only: archiving destroys every member's access. A member gets 403
+    // — they have already proven they may see the split — while anyone with
+    // no role gets the same 404 as a nonexistent id.
     CROW_ROUTE(app, "/api/splits/<string>").methods(crow::HTTPMethod::DELETE)
     ([&pool](const crow::request& req, const std::string& id) {
         crow::response res;
@@ -438,14 +466,28 @@ void register_split_routes(BsApp& app, DbPool& pool) {
             auto conn = pool.acquire();
             pqxx::work txn(*conn);
 
-            // COALESCE keeps the original archival timestamp on a repeat call.
+            // The role and the write are one statement: the UPDATE only fires
+            // when the role computed in `target` is 'owner', and the role is
+            // returned so the handler can tell 403 from 404 without a second
+            // query. COALESCE keeps the original timestamp on a repeat call.
             auto rows = txn.exec(
-                "UPDATE splits SET archived_at = COALESCE(archived_at, now()) "
-                "  WHERE id = $1::uuid AND owner_id = $2::uuid RETURNING id",
+                "WITH target AS ("
+                "    SELECT s.id, split_role(s.id, $2::uuid) AS role"
+                "      FROM splits s WHERE s.id = $1::uuid"
+                "), archived AS ("
+                "    UPDATE splits s SET archived_at = COALESCE(s.archived_at, now())"
+                "      FROM target t WHERE s.id = t.id AND t.role = 'owner'"
+                "    RETURNING s.id"
+                ") SELECT t.role FROM target t",
                 pqxx::params{id, user->id});
             txn.commit();
 
-            if (rows.empty()) return json_error(404, "Split not found");
+            if (rows.empty() || rows[0][0].is_null()) {
+                return json_error(404, "Split not found");
+            }
+            if (rows[0][0].as<std::string>() != "owner") {
+                return json_error(403, "Only the owner can archive a split");
+            }
 
             res.code = 200;
             res.body = R"({"message":"Archived"})";

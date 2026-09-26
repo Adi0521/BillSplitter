@@ -179,6 +179,20 @@ client_max_body_size 10m;
 Most PaaS routers do this by default; confirm yours does. See the README section
 "Known limitation: request body size".
 
+## Deploying a change that includes a migration
+
+**Run the migration against the production database before the new backend
+goes live.** The code and the schema ship separately, and the code assumes the
+schema. Migration 005, for example, defines the `split_role()` function every
+route now calls — a backend deployed ahead of it fails on every authenticated
+request.
+
+```bash
+DATABASE_URL="<pooler connection string>?sslmode=require" ./scripts/migrate.sh
+```
+
+The ledger applies only what is pending, so this is always safe to run.
+
 ## Checklist
 
 - [ ] Database created; `./scripts/migrate.sh` run against it; `pgcrypto` allowed

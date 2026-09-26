@@ -22,7 +22,7 @@ import io
 import re
 import unittest
 
-from harness import ApiTestCase, BAD_IDS, MISSING_UUID, new_user
+from harness import ApiTestCase, BAD_IDS, MISSING_UUID, make_collaborator, new_user
 
 # BAD_IDS contains a space, which http.client refuses to put in a request line.
 def path_id(raw):
@@ -429,6 +429,57 @@ class TestAuthorization(ExportCase):
         r = self.export(c, MISSING_UUID)
         self.assertStatus(r, 404)
         self.assertIn("application/json", r.headers.get("Content-Type", ""))
+
+
+class TestCollaborator(ExportCase):
+    """Export is collaborative: a linked member downloads the same file the
+    owner does. The intruder test above is unchanged — split_role() is NULL for
+    them and NULL is still 404."""
+
+    def setUp(self):
+        self.owner = new_user()
+        self.split = self.owner.make_split(name="Tahoe trip", currency="USD")
+        self.collab, self.seat = make_collaborator(self.owner, self.split["id"], name="Bob")
+        self.alice = self.owner.make_member(self.split["id"], "Alice")
+        bill = self.owner.make_bill(self.split["id"], "Safeway", "2026-08-30")
+        oil = self.owner.make_item(bill["id"], "Olive oil", "12.50", quantity=2)
+        r = self.owner.allocate(bill["id"], oil["id"], "ratio", [
+            {"member_id": self.alice["id"], "ratio": "60"},
+            {"member_id": self.seat["id"], "ratio": "40"},
+        ])
+        self.assertStatus(r, 200)
+
+    def test_collaborator_gets_the_identical_csv(self):
+        mine = self.export(self.owner, self.split["id"])
+        theirs = self.export(self.collab, self.split["id"])
+        self.assertStatus(theirs, 200)
+        self.assertIn("text/csv", theirs.headers.get("Content-Type", ""))
+        self.assertEqual(theirs.body, mine.body,
+                         "a member must download exactly the owner's file")
+        rows = self.csv_rows(theirs)
+        self.assertEqual(rows, [
+            HEADER,
+            ["Tahoe trip", "2026-08-30", "Safeway", "USD",
+             "Olive oil", "12.5000", "2", "25.0000", "Alice", "15.0000"],
+            ["Tahoe trip", "2026-08-30", "Safeway", "USD",
+             "Olive oil", "12.5000", "2", "25.0000", "Bob", "10.0000"],
+        ])
+
+    def test_collaborator_exports_an_empty_split_as_header_only(self):
+        """The access check and the row query are separate; a member of an
+        empty split gets the header, not a 404."""
+        empty = self.owner.make_split(name="Nothing yet")
+        collab, _ = make_collaborator(self.owner, empty["id"])
+        rows = self.csv_rows(self.export(collab, empty["id"]))
+        self.assertEqual(rows, [HEADER])
+
+    def test_collaborator_is_404_on_the_owners_other_split(self):
+        other = self.owner.make_split(name="Private")
+        bill = self.owner.make_bill(other["id"], "Store", "2026-01-15")
+        self.owner.make_item(bill["id"], "Secret caviar", "999.00")
+        r = self.export(self.collab, other["id"])
+        self.assertError(r, 404)
+        self.assertNotIn("caviar", r.body)
 
 
 if __name__ == "__main__":

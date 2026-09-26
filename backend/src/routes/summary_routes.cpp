@@ -41,15 +41,17 @@ bool is_uuid(const std::string& s) {
 // ── SQL ──────────────────────────────────────────────────────────────────────
 //
 // Three queries run in one transaction and therefore against one snapshot: the
-// split header (which is also the ownership check), one row per currency, and
+// split header (which is also the access check), one row per currency, and
 // one row per (currency, member). The last two share the CTE prefix below, so
 // the per-currency totals and the member rows underneath them cannot be
 // aggregated from different sets of bills.
 //
-//   $1 = split id, $2 = owner (session) user id
+//   $1 = split id, $2 = session user id
 //
 // sp
-//   The ownership join, and the only place ownership is established. Zero rows
+//   The access join, and the only place access is established: split_role()
+//   is non-NULL for the owner and for every linked member, so a member's
+//   summary is computed from exactly the same rows as the owner's. Zero rows
 //   means "no such split for this user", so another user's split and a
 //   nonexistent one are indistinguishable (404). Archived splits still resolve:
 //   GET /api/splits/:id returns them, and a summary of a finished trip is
@@ -105,7 +107,7 @@ const char* const SUMMARY_CTE =
     "WITH sp AS ("
     "    SELECT s.id, s.name, s.currency "
     "      FROM splits s "
-    "     WHERE s.id = $1::uuid AND s.owner_id = $2::uuid"
+    "     WHERE s.id = $1::uuid AND split_role(s.id, $2::uuid) IS NOT NULL"
     "), "
     "bill AS ("
     "    SELECT b.id, b.currency, b.tax, b.tip, b.fees, b.payer_member_id, "
@@ -207,11 +209,11 @@ const char* const SUMMARY_CTE =
     "     GROUP BY u.currency"
     ")";
 
-// The split header. Also the ownership check: empty means 404.
+// The split header. Also the access check: empty means 404.
 const char* const SPLIT_SQL =
     "SELECT s.id, s.name, s.currency "
     "  FROM splits s "
-    " WHERE s.id = $1::uuid AND s.owner_id = $2::uuid";
+    " WHERE s.id = $1::uuid AND split_role(s.id, $2::uuid) IS NOT NULL";
 
 // One row per currency: how many bills, what they came to, and the part of
 // them nobody is on the hook for.

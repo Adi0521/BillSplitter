@@ -15,7 +15,8 @@ Asserted against docs/api.md. The points that carry the most weight:
 import unittest
 from urllib.parse import quote
 
-from harness import BAD_IDS, MISSING_UUID, ApiTestCase, Client, new_user
+from harness import (BAD_IDS, MISSING_UUID, ApiTestCase, Client,
+                     make_collaborator, new_user)
 
 
 def as_path_id(value):
@@ -24,7 +25,8 @@ def as_path_id(value):
     return quote(value, safe="")
 
 
-MEMBER_KEYS = {"id", "split_id", "user_id", "name", "email", "joined_at"}
+MEMBER_KEYS = {"id", "split_id", "user_id", "name", "email", "joined_at",
+               "linked", "invite_pending", "is_owner"}
 
 
 class TestAddMember(ApiTestCase, unittest.TestCase):
@@ -168,16 +170,23 @@ class TestListMembers(ApiTestCase, unittest.TestCase):
             self.assertEqual(set(m.keys()), MEMBER_KEYS)
             self.assertEqual(m["split_id"], split["id"])
 
-    def test_a_split_with_no_members_lists_an_empty_array_not_a_404(self):
-        c = new_user()
+    def test_the_owner_seat_is_flagged_and_a_fresh_guest_is_not(self):
+        """`is_owner`, `linked` and `invite_pending` are how the UI tells the
+        creator's seat, a claimed seat and an outstanding invite apart. A brand
+        new guest is none of the three."""
+        c = new_user(display_name="Alice")
         split = c.make_split()
-        owner_member = c.get(f"/api/splits/{split['id']}/members").json[0]
-        self.assertStatus(
-            c.delete(f"/api/splits/{split['id']}/members/{owner_member['id']}"), 200)
-        r = c.get(f"/api/splits/{split['id']}/members")
-        self.assertStatus(r, 200)
-        self.assertEqual(r.json, [],
-                         "a split with no members is a valid, if useless, state")
+        guest = c.make_member(split["id"], name="Guest")
+        self.assertFalse(guest["is_owner"])
+        self.assertFalse(guest["linked"])
+        self.assertFalse(guest["invite_pending"])
+
+        by_id = {m["id"]: m for m in c.get(f"/api/splits/{split['id']}/members").json}
+        owner_seat = [m for m in by_id.values() if m["user_id"] == c.user["id"]][0]
+        self.assertTrue(owner_seat["is_owner"])
+        self.assertTrue(owner_seat["linked"])
+        self.assertFalse(owner_seat["invite_pending"])
+        self.assertFalse(by_id[guest["id"]]["is_owner"])
 
     def test_members_of_an_unknown_split_are_404(self):
         c = new_user()
@@ -218,13 +227,29 @@ class TestRemoveMember(ApiTestCase, unittest.TestCase):
         c.delete(f"/api/splits/{split['id']}/members/{member['id']}")
         self.assertEqual(c.get(f"/api/splits/{split['id']}").json["member_count"], 1)
 
-    def test_removing_the_last_remaining_member_is_allowed(self):
+    def test_every_guest_can_be_removed_but_the_owners_seat_remains(self):
+        """The owner's seat is the one row that can never be removed (400), so
+        the emptiest a split can get through the API is the owner alone."""
         c = new_user()
         split = c.make_split()
+        c.make_member(split["id"], name="Bob")
+        c.make_member(split["id"], name="Carol")
         for m in c.get(f"/api/splits/{split['id']}/members").json:
-            self.assertStatus(c.delete(f"/api/splits/{split['id']}/members/{m['id']}"), 200)
-        self.assertEqual(c.get(f"/api/splits/{split['id']}/members").json, [])
-        self.assertEqual(c.get(f"/api/splits/{split['id']}").json["member_count"], 0)
+            r = c.delete(f"/api/splits/{split['id']}/members/{m['id']}")
+            self.assertStatus(r, 400 if m["is_owner"] else 200)
+        remaining = c.get(f"/api/splits/{split['id']}/members").json
+        self.assertEqual([m["is_owner"] for m in remaining], [True])
+        self.assertEqual(c.get(f"/api/splits/{split['id']}").json["member_count"], 1)
+
+    def test_the_owner_cannot_remove_their_own_seat(self):
+        c = new_user()
+        split = c.make_split()
+        owner_seat = c.get(f"/api/splits/{split['id']}/members").json[0]
+        self.assertTrue(owner_seat["is_owner"])
+        r = c.delete(f"/api/splits/{split['id']}/members/{owner_seat['id']}")
+        self.assertError(r, 400)
+        ids = [m["id"] for m in c.get(f"/api/splits/{split['id']}/members").json]
+        self.assertIn(owner_seat["id"], ids, "a 400 must not have deleted anything")
 
     def test_an_unknown_member_id_is_404(self):
         c = new_user()
@@ -289,6 +314,69 @@ class TestMemberOwnership(ApiTestCase, unittest.TestCase):
                                    {"name": "Anon"}), 401)
         self.assertError(anon.delete(
             f"/api/splits/{self.split['id']}/members/{self.member['id']}"), 401)
+
+
+class TestCollaborator(ApiTestCase, unittest.TestCase):
+    """A linked member sees and adds members exactly as the owner does. The
+    two administrative actions on this resource — removing a seat, and (in
+    test_invites) managing invites — are owner-only and answer a member with
+    403, the one status that admits the split exists. The stranger tests in
+    TestMemberOwnership are unchanged: split_role() is NULL for them, and NULL
+    is still 404."""
+
+    def setUp(self):
+        self.owner = new_user(display_name="Alice")
+        self.split = self.owner.make_split()
+        self.collab, self.seat = make_collaborator(self.owner, self.split["id"], name="Bob")
+        self.guest = self.owner.make_member(self.split["id"], name="Guest")
+
+    def test_a_member_lists_the_same_members_as_the_owner(self):
+        mine = self.owner.get(f"/api/splits/{self.split['id']}/members")
+        theirs = self.collab.get(f"/api/splits/{self.split['id']}/members")
+        self.assertStatus(theirs, 200)
+        self.assertEqual(theirs.json, mine.json, "byte-for-byte the same listing")
+        own_seat = [m for m in theirs.json if m["id"] == self.seat["id"]][0]
+        self.assertEqual(own_seat["user_id"], self.collab.user["id"])
+        self.assertTrue(own_seat["linked"])
+        self.assertFalse(own_seat["is_owner"])
+
+    def test_a_member_can_add_a_member(self):
+        r = self.collab.post(f"/api/splits/{self.split['id']}/members", {"name": "Dave"})
+        self.assertStatus(r, 201)
+        self.assertEqual(set(r.json.keys()), MEMBER_KEYS)
+        names = [m["name"] for m in
+                 self.owner.get(f"/api/splits/{self.split['id']}/members").json]
+        self.assertIn("Dave", names, "the owner sees what the member added")
+
+    def test_a_member_removing_a_member_is_403_and_nothing_is_deleted(self):
+        r = self.collab.delete(f"/api/splits/{self.split['id']}/members/{self.guest['id']}")
+        self.assertError(r, 403)
+        ids = [m["id"] for m in
+               self.owner.get(f"/api/splits/{self.split['id']}/members").json]
+        self.assertIn(self.guest["id"], ids)
+
+    def test_a_member_cannot_remove_their_own_seat_either(self):
+        """Leaving is `POST /leave`, which unlinks; DELETE is removal and is
+        the owner's call."""
+        r = self.collab.delete(f"/api/splits/{self.split['id']}/members/{self.seat['id']}")
+        self.assertError(r, 403)
+
+    def test_nobody_can_remove_the_owners_seat(self):
+        owner_seat = [m for m in
+                      self.owner.get(f"/api/splits/{self.split['id']}/members").json
+                      if m["is_owner"]][0]
+        path = f"/api/splits/{self.split['id']}/members/{owner_seat['id']}"
+        self.assertError(self.collab.delete(path), 400)
+        self.assertError(self.owner.delete(path), 400)
+        ids = [m["id"] for m in
+               self.owner.get(f"/api/splits/{self.split['id']}/members").json]
+        self.assertIn(owner_seat["id"], ids)
+
+    def test_a_member_of_a_different_split_is_still_a_stranger_here(self):
+        other = self.owner.make_split(name="Other")
+        self.assertError(self.collab.get(f"/api/splits/{other['id']}/members"), 404)
+        self.assertError(self.collab.post(f"/api/splits/{other['id']}/members",
+                                          {"name": "Intruder"}), 404)
 
 
 class TestMalformedMemberIds(ApiTestCase, unittest.TestCase):

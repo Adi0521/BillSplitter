@@ -11,9 +11,15 @@ Conventions that hold everywhere:
 - Timestamps are Postgres `TIMESTAMPTZ` rendered as strings, passed through as-is.
 - Money is `NUMERIC(12,4)`, serialized as a **string** to avoid float rounding
   (e.g. `"12.5000"`). Not applicable in Phase 2; stated here so it is settled.
-- Every split-scoped resource is authorized by `splits.owner_id = <session user>`.
-  A split that exists but is not owned by the caller returns **404, not 403**, so
-  the API does not leak which split ids exist.
+- Every split-scoped resource is authorized by **`split_role(split_id, user)`**,
+  a SQL function defined in migration 005 — the single definition of who may
+  touch a split. It returns `'owner'`, `'member'`, or `NULL`.
+  - `NULL` → **404, never 403**, so the API does not reveal which split ids exist.
+  - `'member'` → full access to everything *inside* the split, identical to the
+    owner, except the four administrative actions listed under "Collaboration".
+  - `'member'` attempting an owner-only action → **403** — the only place 403
+    appears in this API, because it is the only case where the caller has proven
+    they may see the split.
 - Status codes: 200 OK, 201 Created (body = created object), 400 invalid input,
   401 unauthenticated, 404 not found or not owned, 409 conflict, 500 unexpected.
 
@@ -48,9 +54,14 @@ Conventions that hold everywhere:
   "share_token":  "hex32",
   "created_at":   "2026-08-30 22:51:45.947108+00",
   "archived_at":  null,            // string when archived
-  "member_count": 3                // computed, present on list and detail
+  "member_count": 3,               // computed, present on list and detail
+  "role":         "owner"          // "owner" | "member": the CALLER's relationship
 }
 ```
+
+`GET /api/splits` returns every split the caller can access — the ones they own
+**and** the ones they are a linked member of — each tagged with `role`. The UI's
+"Mine" and "Invited" tabs are a client-side filter on that field.
 
 | Method | Path | Body | Response |
 |---|---|---|---|
@@ -93,9 +104,15 @@ empty body is a 400, not a silent no-op.
   "user_id":   null,          // uuid when the member is a registered user
   "name":      "Alice",
   "email":     null,          // string when provided
-  "joined_at": "2026-08-30 22:51:45.947108+00"
+  "joined_at": "2026-08-30 22:51:45.947108+00",
+  "linked":    false,         // true once an account has claimed this seat
+  "invite_pending": false,    // true while an unclaimed invite token exists
+  "is_owner":  false          // the split creator's own seat
 }
 ```
+
+The invite token itself is **never** included in a member listing. It is
+returned exactly once, from the endpoint that creates it.
 
 | Method | Path | Body | Response |
 |---|---|---|---|
@@ -111,8 +128,9 @@ empty body is a 400, not a silent no-op.
   allowed (two people really can both be "Alex"); the id is the identity.
 - `email`, when present, must contain `@` and be ≤ 320 chars.
 - Deleting a member that does not belong to `:id` is a 404.
-- Removing the last remaining member is allowed; a split with no members is a
-  valid, if useless, state.
+- The owner's own seat can never be removed (400) — see "Collaboration". Every
+  other seat can be, so the smallest a split gets is one member: its owner.
+- Removing a member is **owner-only** (403 for a linked member).
 
 ---
 
@@ -818,6 +836,92 @@ A split called `x"\r\nSet-Cookie: ...` must not be able to add a header.
 
 Standard RFC 4180 quoting otherwise: a field containing a comma, a double quote
 or a newline is wrapped in double quotes, and embedded quotes are doubled.
+
+---
+
+## Collaboration — members with accounts
+
+A member row is a seat at the table. An **invite link** binds an account to a
+seat; from then on that person sees the split in their own account and can work
+on it exactly as the owner does.
+
+### Why invite links and not email matching
+
+Emails in this system are **never verified** — there is no mail service. Binding
+seats to accounts by matching the member's email would let anyone register as
+`alice@herwork.com` and instantly see every split Alice was ever added to.
+
+So the token is the secret. The owner generates a link for a specific seat and
+hands it to the person it is for, by any channel they already trust. Anyone who
+holds the link can claim the seat — which is exactly the property a shared
+secret is supposed to have, and the same model `share_token` already uses.
+
+### What a member may do
+
+Everything inside the split, with the **same responses as the owner** — read it,
+add and edit bills, items and allocations, record and delete payments, export
+it, parse receipts into it. A member is not a second-class participant.
+
+Four actions are about the split itself rather than its contents and stay
+**owner-only**; a member attempting one gets **403**:
+
+| Action | Why owner-only |
+|---|---|
+| Archive the split (`DELETE /api/splits/:id`) | destroys everyone's access |
+| Remove a member (`DELETE .../members/:mid`) | could eject the owner or another participant |
+| Create or revoke an invite | controls who else gets in |
+| Regenerate the share link | invalidates a link others may hold |
+
+The owner's own seat can never be removed, by anyone (400). A member leaves via
+`POST /api/splits/:id/leave`, which **unlinks** the account from the seat but
+keeps the seat — their allocations and payments are part of the ledger and must
+survive their departure. The owner cannot leave (400); archive instead.
+
+### Endpoints
+
+| Method | Path | Who | Response |
+|---|---|---|---|
+| POST | `/api/splits/:id/members/:mid/invite` | owner | 200 `{"invite_token": "...", "invite_path": "/invite/<token>"}` |
+| DELETE | `/api/splits/:id/members/:mid/invite` | owner | 200 `{"message":"Invite revoked"}` |
+| GET | `/api/invites/:token` | any signed-in user | 200 `InvitePreview` |
+| POST | `/api/invites/:token/claim` | any signed-in user | 200 `{"split_id": "..."}` |
+| POST | `/api/splits/:id/leave` | member | 200 `{"message":"Left"}` |
+
+```jsonc
+// InvitePreview — enough to render "You've been invited to join X as Bob"
+{
+  "split_name":  "Tahoe trip",
+  "member_name": "Bob",
+  "invited_by":  "Alice",        // the owner's display name; never their email
+  "already_member": false,       // true if the caller already holds a seat here
+  "split_id":    "uuid"          // so the UI can deep-link; names are not unique
+}
+```
+
+The 409 from `claim` carries the same `split_id` alongside `error`, for the same
+reason: "you're already in this split" should link to it, not describe it.
+
+- **Creating an invite** for a seat that already has one **replaces** the token;
+  the old link stops working. Inviting an already-linked seat is a 400.
+- **Claiming** binds `user_id` to the seat, sets `linked_at`, and **clears the
+  token** in one transaction — a link works exactly once. A second claim of the
+  same link is a 404, indistinguishable from a link that never existed.
+- A user who already holds a seat in that split (owner included) cannot claim a
+  second one: **409**. The partial unique index enforces this even under a race.
+- Unknown, revoked or consumed token → **404**, one message for all three. Do not
+  tell a caller *why* their link failed.
+- The preview requires a session for the same reason claiming does: there is no
+  useful anonymous view of an invite, and requiring sign-in first means the
+  claim can happen in the same visit.
+- Tokens are 32 hex characters from `gen_random_bytes(16)`, same as
+  `share_token`. Enumeration is not a concern.
+
+### Payments and settlements are between seats, not accounts
+
+`from_member` / `to_member` reference seats. When Bob claims his seat, every
+payment and allocation already recorded against "Bob" becomes his — nothing is
+re-keyed. That is the point of binding to the existing seat rather than
+creating a new member row for the account.
 
 ---
 

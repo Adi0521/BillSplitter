@@ -11,6 +11,10 @@ function normalize(e) {
     (e?.response ? `Request failed (${e.response.status}).` : 'Network error — is the backend running?')
   const err = new Error(msg)
   err.status = e?.response?.status
+  // Some failures carry useful fields beyond `error` — the invite claim's 409
+  // names the split the caller is already in. Expose the body so a view can
+  // act on it without digging through axios internals.
+  err.data = e?.response?.data ?? null
   err.cause = e
   return err
 }
@@ -96,6 +100,53 @@ export const useSplitsStore = defineStore('splits', () => {
     } catch (e) { throw normalize(e) }
   }
 
+  // ── Collaboration ──────────────────────────────────────────────────────────
+  // Owner-only actions return 403 for a linked member (the only 403s in the
+  // API). Callers branch on err.status to explain rather than just fail.
+
+  // Returns { invite_token, invite_path }. The token is shown once; the member
+  // list only ever reports invite_pending, never the token itself.
+  async function inviteMember(splitId, memberId) {
+    try {
+      const { data } = await api.post(`/splits/${splitId}/members/${memberId}/invite`)
+      members.value = members.value.map(m => (m.id === memberId ? { ...m, invite_pending: true } : m))
+      return data
+    } catch (e) { throw normalize(e) }
+  }
+
+  async function revokeInvite(splitId, memberId) {
+    try {
+      await api.delete(`/splits/${splitId}/members/${memberId}/invite`)
+      members.value = members.value.map(m => (m.id === memberId ? { ...m, invite_pending: false } : m))
+    } catch (e) { throw normalize(e) }
+  }
+
+  async function previewInvite(token) {
+    try {
+      const { data } = await api.get(`/invites/${token}`)
+      return data
+    } catch (e) { throw normalize(e) }
+  }
+
+  // Resolves to { split_id }. 404 = unknown/consumed/revoked (one message for
+  // all three, deliberately); 409 = the caller already holds a seat here.
+  async function claimInvite(token) {
+    try {
+      const { data } = await api.post(`/invites/${token}/claim`)
+      return data
+    } catch (e) { throw normalize(e) }
+  }
+
+  // Unlinks the caller's account from their seat. The seat and its ledger
+  // entries stay; the split simply disappears from this account's list.
+  async function leaveSplit(splitId) {
+    try {
+      await api.post(`/splits/${splitId}/leave`)
+      splits.value = splits.value.filter(s => s.id !== splitId)
+      if (current.value?.id === splitId) { current.value = null; members.value = [] }
+    } catch (e) { throw normalize(e) }
+  }
+
   function reset() {
     splits.value = []
     current.value = null
@@ -105,6 +156,8 @@ export const useSplitsStore = defineStore('splits', () => {
   return {
     splits, current, members,
     fetchSplits, createSplit, fetchSplit, updateSplit, archiveSplit,
-    fetchMembers, addMember, removeMember, reset,
+    fetchMembers, addMember, removeMember,
+    inviteMember, revokeInvite, previewInvite, claimInvite, leaveSplit,
+    reset,
   }
 })

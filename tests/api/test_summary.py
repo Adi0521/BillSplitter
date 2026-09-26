@@ -34,7 +34,7 @@ point.
 import unittest
 from decimal import Decimal, ROUND_HALF_UP, localcontext
 
-from harness import ApiTestCase, BAD_IDS, MISSING_UUID, Client, new_user
+from harness import ApiTestCase, BAD_IDS, MISSING_UUID, Client, make_collaborator, new_user
 
 # BAD_IDS contains a space, which http.client refuses to put in a request line.
 def path_id(raw):
@@ -742,3 +742,112 @@ class TestPaymentOnlyCurrency(ApiTestCase, unittest.TestCase):
             self.assertEqual(m["payments_made"], "0.0000")
             self.assertEqual(m["payments_received"], "0.0000")
         self.assertTrue(self.summary()["mixed_currency"])
+
+
+class TestCollaborator(SummaryCase):
+    """A linked member's summary is the owner's summary. The access predicate
+    is split_role() IS NOT NULL inside the `sp` CTE, so every downstream
+    aggregate is computed from exactly the same rows whoever is asking."""
+
+    def build(self):
+        """The TestTwoPayers scenario, with Bob's seat claimed by a real
+        account: Alice fronts dinner (60/40), Bob fronts the taxi (50/50)."""
+        owner = new_user()
+        split = owner.make_split()
+        alice = owner.make_member(split["id"], "Alice")
+        collab, bob = make_collaborator(owner, split["id"], name="Bob")
+
+        dinner = owner.make_bill(split["id"], store_name="Dinner", tax="10.00",
+                                 payer_member_id=alice["id"])
+        feast = owner.make_item(dinner["id"], name="Feast", price="100.00")
+        self.assertStatus(owner.allocate(dinner["id"], feast["id"], "ratio",
+            [{"member_id": alice["id"], "ratio": "60"},
+             {"member_id": bob["id"], "ratio": "40"}]), 200)
+
+        taxi = owner.make_bill(split["id"], store_name="Taxi",
+                               payer_member_id=bob["id"])
+        ride = owner.make_item(taxi["id"], name="Ride", price="50.00")
+        self.assertStatus(owner.allocate(taxi["id"], ride["id"], "ratio",
+            [{"member_id": alice["id"], "ratio": "50"},
+             {"member_id": bob["id"], "ratio": "50"}]), 200)
+        return owner, collab, split, alice, bob
+
+    def test_a_member_gets_200_with_the_documented_shape(self):
+        owner, collab, split, alice, bob = self.build()
+        s = self.summary(collab, split["id"])   # asserts 200 and every money field
+        self.assertEqual(s["split_id"], split["id"])
+        self.assertEqual(s["name"], split["name"])
+
+    def test_a_members_summary_is_byte_identical_to_the_owners(self):
+        owner, collab, split, alice, bob = self.build()
+        url = f"/api/splits/{split['id']}/summary"
+        mine, theirs = owner.get(url), collab.get(url)
+        self.assertStatus(mine, 200)
+        self.assertStatus(theirs, 200)
+        self.assertEqual(mine.body, theirs.body,
+                         "the numbers must not depend on who is asking")
+
+    def test_a_member_sees_their_own_seat_with_the_right_balance(self):
+        """Bob's seat carries Bob's numbers into Bob's account — no re-keying.
+        These are TestTwoPayers' figures, unchanged by who is reading them."""
+        owner, collab, split, alice, bob = self.build()
+        members = self.by_member(self.group(self.summary(collab, split["id"]), "USD"))
+        self.assertEqual(members[bob["id"]]["name"], "Bob")
+        self.assertEqual(members[bob["id"]]["owes"], "69.0000")
+        self.assertEqual(members[bob["id"]]["fronted"], "50.0000")
+        self.assertEqual(members[bob["id"]]["balance"], "-19.0000")
+        self.assertEqual(members[alice["id"]]["balance"], "19.0000")
+        for m in members.values():
+            self.assertBalanceIdentity(m)
+
+    def test_a_payment_recorded_by_the_member_moves_the_balances_as_the_owners_would(self):
+        """The same 4.00 from Bob to Alice, recorded once by the owner and once
+        by Bob himself, produces the same summary — and it is the summary
+        TestTwoPayers pins down for the owner-recorded case."""
+        def after_payment(recorded_by_member):
+            owner, collab, split, alice, bob = self.build()
+            recorder = collab if recorded_by_member else owner
+            r = recorder.post(f"/api/splits/{split['id']}/payments",
+                              {"from_member": bob["id"], "to_member": alice["id"],
+                               "amount": "4.00", "method": "venmo"})
+            self.assertStatus(r, 201)
+            # Both readers see the same thing afterwards, too.
+            url = f"/api/splits/{split['id']}/summary"
+            self.assertEqual(owner.get(url).body, collab.get(url).body)
+            g = self.group(self.summary(collab, split["id"]), "USD")
+            return {m["name"]: m for m in g["members"]}, g["settlements"]
+
+        by_owner, settle_owner = after_payment(recorded_by_member=False)
+        by_member, settle_member = after_payment(recorded_by_member=True)
+
+        for name in ("Alice", "Bob"):
+            with self.subTest(member=name):
+                for field in ("owes", "fronted", "payments_made",
+                              "payments_received", "balance"):
+                    self.assertEqual(by_owner[name][field], by_member[name][field],
+                                     f"{name}.{field} differs by who recorded it")
+        self.assertEqual([t["amount"] for t in settle_owner],
+                         [t["amount"] for t in settle_member])
+
+        # And they are the numbers the owner-only suite already pins down.
+        self.assertEqual(by_member["Alice"]["owes"], "91.0000")
+        self.assertEqual(by_member["Bob"]["owes"], "69.0000")
+        self.assertEqual(by_member["Bob"]["payments_made"], "4.0000")
+        self.assertEqual(by_member["Alice"]["payments_received"], "4.0000")
+        self.assertEqual(by_member["Alice"]["balance"], "15.0000")
+        self.assertEqual(by_member["Bob"]["balance"], "-15.0000")
+        self.assertEqual(Decimal(settle_member[0]["amount"]), Decimal("15.0000"))
+
+    def test_a_member_still_sees_an_archived_split(self):
+        owner, collab, split, alice, bob = self.build()
+        self.assertStatus(owner.delete(f"/api/splits/{split['id']}"), 200)
+        s = self.summary(collab, split["id"])
+        self.assertEqual(s["split_id"], split["id"])
+
+    def test_a_member_of_one_split_is_still_a_stranger_to_another(self):
+        """Linking to split A grants nothing on the same owner's split B."""
+        owner, collab, split, alice, bob = self.build()
+        other = owner.make_split()
+        owner.make_bill(other["id"])
+        self.assertError(collab.get(f"/api/splits/{other['id']}/summary"), 404)
+        self.assertStatus(owner.get(f"/api/splits/{other['id']}/summary"), 200)

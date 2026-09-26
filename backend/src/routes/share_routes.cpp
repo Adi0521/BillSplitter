@@ -40,10 +40,11 @@ bool is_uuid(const std::string& s) {
 // Two queries run in one transaction: the bill-level totals and the per-member
 // rows. They share the CTE prefix below so the two answers cannot drift apart.
 //
-//   $1 = bill id, $2 = split id, $3 = owner (session) user id
+//   $1 = bill id, $2 = split id, $3 = session user id
 //
 // bill
-//   The ownership join. Zero rows here means "no such bill for this user", so
+//   The access join: split_role() is non-NULL for the owner and for every
+//   linked member. Zero rows here means "no such bill for this user", so
 //   another user's bill and a nonexistent one are indistinguishable (404).
 //   subtotal is derived as SUM(price * quantity) over the bill's items; there
 //   is no bills.subtotal column (dropped in migration 003). The 0.0000 fallback
@@ -69,7 +70,7 @@ const char* const SHARES_CTE =
     "               AS subtotal "
     "      FROM bills b JOIN splits s ON s.id = b.split_id "
     "     WHERE b.id = $1::uuid AND b.split_id = $2::uuid "
-    "       AND s.owner_id = $3::uuid"
+    "       AND split_role(s.id, $3::uuid) IS NOT NULL"
     "), "
     "shares AS ("
     "    SELECT a.member_id, "

@@ -12,7 +12,7 @@ no float ever derives an expectation here.
 import unittest
 from decimal import Decimal
 
-from harness import ApiTestCase, BAD_IDS, MISSING_UUID, new_user
+from harness import ApiTestCase, BAD_IDS, MISSING_UUID, make_collaborator, new_user
 
 # BAD_IDS contains a space, which http.client refuses to put in a request line.
 # Encoding only the space keeps the hostile string intact server-side.
@@ -286,6 +286,71 @@ class TestItemOwnership(ItemCase):
         self.assertError(c.get(f"/api/bills/{MISSING_UUID}/items"), 404)
         self.assertError(c.post(f"/api/bills/{MISSING_UUID}/items",
                                 {"name": "X", "price": "1.00"}), 404)
+
+
+
+class TestCollaborator(ItemCase):
+    """Items are reached through bill_items -> bills -> splits, and the final
+    predicate on that join is split_role(), so a linked member gets the same
+    answer as the owner on all four verbs. Strangers stay at 404 (see above)."""
+
+    def setUp(self):
+        self.owner = new_user()
+        self.split = self.owner.make_split(currency="EUR")
+        self.collab, self.seat = make_collaborator(self.owner, self.split["id"])
+        self.bill = self.owner.make_bill(self.split["id"])
+
+    def test_collaborator_can_list_and_create_items(self):
+        self.owner.make_item(self.bill["id"], name="Owner's", price="10.00")
+
+        listing = self.collab.get(f"/api/bills/{self.bill['id']}/items")
+        self.assertStatus(listing, 200)
+        self.assertEqual([i["name"] for i in listing.json], ["Owner's"])
+
+        r = self.collab.post(f"/api/bills/{self.bill['id']}/items",
+                             {"name": "Olive oil", "price": "12.50", "quantity": 2})
+        self.assertStatus(r, 201)
+        self.assertEqual(r.json["bill_id"], self.bill["id"])
+        self.assertEqual(r.json["price"], "12.5000")
+        self.assertEqual(r.json["line_total"], "25.0000")
+        # Currency inherits from the bill exactly as it does for the owner.
+        self.assertEqual(r.json["currency"], "EUR")
+
+        # Both parties see the same two items, and the bill subtotal moved.
+        self.assertEqual(len(self.owner.get(f"/api/bills/{self.bill['id']}/items").json), 2)
+        self.assertEqual(self.subtotal_of(self.collab, self.bill), "35.0000")
+        self.assertEqual(self.subtotal_of(self.owner, self.bill), "35.0000")
+
+    def test_collaborator_can_update_and_delete_items(self):
+        item = self.owner.make_item(self.bill["id"], price="10.00")
+        path = f"/api/bills/{self.bill['id']}/items/{item['id']}"
+
+        r = self.collab.put(path, {"price": "25.00"})
+        self.assertStatus(r, 200)
+        self.assertEqual(r.json["price"], "25.0000")
+        self.assertEqual(self.subtotal_of(self.owner, self.bill), "25.0000")
+
+        # Validation, not authorization, decides a bad body: 400 not 404.
+        self.assertError(self.collab.put(path, {"price": "abc"}), 400)
+
+        self.assertStatus(self.collab.delete(path), 200)
+        self.assertEqual(self.owner.get(f"/api/bills/{self.bill['id']}/items").json, [])
+        self.assertError(self.collab.delete(path), 404)
+
+    def test_collaborator_gets_404_on_the_owners_other_split(self):
+        """Membership does not travel: a bill in a split the collaborator is
+        not linked to is invisible, same as for any stranger."""
+        other_bill = self.owner.make_bill(self.owner.make_split()["id"])
+        item = self.owner.make_item(other_bill["id"], price="10.00")
+        path = f"/api/bills/{other_bill['id']}/items/{item['id']}"
+        self.assertError(self.collab.get(f"/api/bills/{other_bill['id']}/items"), 404)
+        self.assertError(self.collab.post(f"/api/bills/{other_bill['id']}/items",
+                                          {"name": "X", "price": "1.00"}), 404)
+        self.assertError(self.collab.put(path, {"price": "0.01"}), 404)
+        self.assertError(self.collab.delete(path), 404)
+        self.assertEqual(
+            self.owner.get(f"/api/bills/{other_bill['id']}/items").json[0]["price"],
+            "10.0000")
 
 
 class TestItemBadIds(ItemCase):

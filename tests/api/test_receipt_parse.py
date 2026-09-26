@@ -26,7 +26,7 @@ import urllib.request
 import uuid
 import zlib
 
-from harness import ApiTestCase, BAD_IDS, MISSING_UUID, Response, new_user
+from harness import ApiTestCase, BAD_IDS, MISSING_UUID, Response, make_collaborator, new_user
 
 MAX_UPLOAD = 10 * 1024 * 1024
 
@@ -370,6 +370,38 @@ class TestReceiptParseImage(ReceiptCase, unittest.TestCase):
         self.assertStatus(post_file(c, parse_path(split["id"]), png_bytes()), 200)
         bills = c.get(f"/api/splits/{split['id']}/bills")
         self.assertEqual(bills.json, [])
+
+
+# ── collaboration ───────────────────────────────────────────────────────────
+
+class TestCollaborator(ReceiptCase, unittest.TestCase):
+    """Parsing a receipt into a split is collaborative: a linked member gets the
+    same draft the owner gets. The stranger tests above are unchanged."""
+
+    def setUp(self):
+        self.owner = new_user()
+        self.split = self.owner.make_split(currency="EUR")
+        self.collab, _ = make_collaborator(self.owner, self.split["id"])
+
+    def test_collaborator_gets_a_draft_in_the_splits_currency(self):
+        r = post_file(self.collab, parse_path(self.split["id"]), png_bytes())
+        self.assertStatus(r, 200)
+        self.assertDraftShape(r.json)
+        self.assertEqual(r.json["source"], "image")
+        self.assertEqual(r.json["currency"], "EUR")
+        # Same contract as the owner: parsing persists nothing.
+        self.assertEqual(self.owner.get(f"/api/splits/{self.split['id']}/bills").json, [])
+
+    def test_collaborator_bad_file_is_400_not_404(self):
+        """Once access is proven the file is graded, so a member uploading junk
+        gets the same 400 the owner would — not the stranger's 404."""
+        r = post_file(self.collab, parse_path(self.split["id"]), b"not an image at all")
+        self.assertError(r, 400)
+
+    def test_collaborator_is_404_on_the_owners_other_split(self):
+        other = self.owner.make_split()
+        r = post_file(self.collab, parse_path(other["id"]), png_bytes())
+        self.assertError(r, 404)
 
 
 if __name__ == "__main__":

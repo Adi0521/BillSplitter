@@ -18,7 +18,7 @@ is never used to derive an expectation.
 import unittest
 from decimal import Decimal, ROUND_HALF_UP, localcontext
 
-from harness import ApiTestCase, BAD_IDS, MISSING_UUID, new_user
+from harness import ApiTestCase, BAD_IDS, MISSING_UUID, make_collaborator, new_user
 
 # BAD_IDS contains a space, which http.client refuses to put in a request line.
 def path_id(raw):
@@ -425,6 +425,72 @@ class TestSharesBadIds(ShareCase):
                     r = c.get(path)
                     self.assertLess(r.status, 500, f"{r}")
                     self.assertIn(r.status, (400, 404), f"{r}")
+
+
+class TestCollaborator(ShareCase):
+    """A linked member reads a bill's shares exactly as the owner does. The
+    access predicate is split_role() IS NOT NULL, so the CTE resolves the same
+    bill for both and the arithmetic downstream cannot tell them apart."""
+
+    def build(self):
+        owner = new_user()
+        split = owner.make_split()
+        alice = owner.make_member(split["id"], "Alice")
+        collab, seat = make_collaborator(owner, split["id"], name="Collab")
+        bill = owner.make_bill(split["id"], tax="10.00", tip="5.00",
+                               payer_member_id=alice["id"])
+        item = owner.make_item(bill["id"], price="100.00")
+        r = owner.allocate(bill["id"], item["id"], "ratio",
+                           [{"member_id": alice["id"], "ratio": "60"},
+                            {"member_id": seat["id"], "ratio": "40"}])
+        self.assertStatus(r, 200)
+        return owner, collab, split, alice, seat, bill
+
+    def test_a_member_gets_200_with_the_documented_shape(self):
+        owner, collab, split, alice, seat, bill = self.build()
+        s = self.shares(collab, bill)   # asserts 200 and every money field
+        self.assertEqual(s["bill_id"], bill["id"])
+        self.assertEqual(s["payer_member_id"], alice["id"])
+        # Every seat is a row, the owner's own included; both of ours are there.
+        self.assertLessEqual({alice["id"], seat["id"]},
+                             {m["member_id"] for m in s["members"]})
+
+    def test_a_members_response_is_byte_identical_to_the_owners(self):
+        owner, collab, split, alice, seat, bill = self.build()
+        url = f"/api/splits/{split['id']}/bills/{bill['id']}/shares"
+        mine, theirs = owner.get(url), collab.get(url)
+        self.assertStatus(mine, 200)
+        self.assertStatus(theirs, 200)
+        self.assertEqual(mine.body, theirs.body,
+                         "the numbers must not depend on who is asking")
+
+    def test_a_member_sees_their_own_seat_owing_the_payer(self):
+        """The seat is the identity: what "Collab" owes is what the linked
+        account sees itself owing, with no re-keying."""
+        owner, collab, split, alice, seat, bill = self.build()
+        row = self.by_member(self.shares(collab, bill))[seat["id"]]
+        self.assertEqual(row["items"], "40.0000")
+        expected_total = (Decimal("40.0000") + proportional("40", "100", "10")
+                          + proportional("40", "100", "5"))
+        self.assertEqual(Decimal(row["total"]), expected_total)
+        self.assertEqual(row["owes_payer"], row["total"])
+
+    def test_a_member_gets_the_same_404s_as_the_owner(self):
+        owner, collab, split, alice, seat, bill = self.build()
+        other = owner.make_split()
+        for client in (owner, collab):
+            with self.subTest(client="owner" if client is owner else "member"):
+                self.assertError(client.get(
+                    f"/api/splits/{other['id']}/bills/{bill['id']}/shares"), 404)
+                self.assertError(client.get(
+                    f"/api/splits/{split['id']}/bills/{MISSING_UUID}/shares"), 404)
+
+    def test_a_member_of_one_split_is_still_a_stranger_to_another(self):
+        owner, collab, split, alice, seat, bill = self.build()
+        other = owner.make_split()
+        other_bill = owner.make_bill(other["id"])
+        self.assertError(collab.get(
+            f"/api/splits/{other['id']}/bills/{other_bill['id']}/shares"), 404)
 
 
 if __name__ == "__main__":

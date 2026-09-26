@@ -280,7 +280,7 @@ void register_payment_routes(BsApp& app, DbPool& pool) {
                 "  LEFT JOIN payments p ON p.split_id = s.id"
                 "  LEFT JOIN split_members fm ON fm.id = p.from_member"
                 "  LEFT JOIN split_members tm ON tm.id = p.to_member"
-                " WHERE s.id = $1::uuid AND s.owner_id = $2::uuid"
+                " WHERE s.id = $1::uuid AND split_role(s.id, $2::uuid) IS NOT NULL"
                 " ORDER BY p.paid_at DESC, p.id",
                 pqxx::params{split_id, user->id});
             txn.commit();
@@ -355,7 +355,7 @@ void register_payment_routes(BsApp& app, DbPool& pool) {
 
             auto split = txn.exec(
                 "SELECT currency FROM splits"
-                " WHERE id = $1::uuid AND owner_id = $2::uuid",
+                " WHERE id = $1::uuid AND split_role(id, $2::uuid) IS NOT NULL",
                 pqxx::params{split_id, user->id});
             if (split.empty()) {
                 txn.commit();
@@ -401,7 +401,7 @@ void register_payment_routes(BsApp& app, DbPool& pool) {
                 "     method, notes)"
                 "  SELECT s.id, $2::uuid, $3::uuid, $4::numeric, $5, $6, $7"
                 "    FROM splits s"
-                "   WHERE s.id = $1::uuid AND s.owner_id = $8::uuid"
+                "   WHERE s.id = $1::uuid AND split_role(s.id, $8::uuid) IS NOT NULL"
                 "  RETURNING id",
                 pqxx::params{split_id, from_member, to_member, amount, currency,
                              method, notes, user->id});
@@ -417,7 +417,7 @@ void register_payment_routes(BsApp& app, DbPool& pool) {
                 "  LEFT JOIN split_members fm ON fm.id = p.from_member"
                 "  LEFT JOIN split_members tm ON tm.id = p.to_member"
                 " WHERE p.id = $1::uuid AND p.split_id = $2::uuid"
-                "   AND s.owner_id = $3::uuid",
+                "   AND split_role(s.id, $3::uuid) IS NOT NULL",
                 pqxx::params{inserted[0][0].as<std::string>(), split_id,
                              user->id});
             txn.commit();
@@ -470,7 +470,7 @@ void register_payment_routes(BsApp& app, DbPool& pool) {
                 " WHERE p.id = $1::uuid"
                 "   AND p.split_id = s.id"
                 "   AND s.id = $2::uuid"
-                "   AND s.owner_id = $3::uuid"
+                "   AND split_role(s.id, $3::uuid) IS NOT NULL"
                 " RETURNING p.id",
                 pqxx::params{payment_id, split_id, user->id});
 

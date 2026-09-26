@@ -206,6 +206,10 @@ Implemented today:
 | DELETE | `/api/splits/:id/payments/:pid` | Delete a payment record |
 | POST | `/api/splits/:id/bills/parse` | Upload a receipt image/HTML, get an unsaved draft |
 | GET | `/api/splits/:id/export/csv` | Flat CSV of items and allocations |
+| POST | `/api/splits/:id/members/:mid/invite` | Owner mints a one-use invite link for a seat |
+| GET | `/api/invites/:token` | Preview an invite (signed in) |
+| POST | `/api/invites/:token/claim` | Bind your account to the seat |
+| POST | `/api/splits/:id/leave` | Unlink your account; the seat and ledger stay |
 | GET | `/api/splits/share/:token` | **Public**, no auth — read-only split view |
 | POST | `/api/splits/:id/share/regenerate` | New share token; old link stops working |
 

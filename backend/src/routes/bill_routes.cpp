@@ -260,8 +260,8 @@ const char* const BILL_COLUMNS =
     "(agg.subtotal + b.tax + b.tip + b.fees), b.payer_member_id, "
     "agg.item_count, b.created_at";
 
-// The join to splits is what enforces ownership, and the LATERAL aggregate is
-// what keeps item_count and subtotal out of an N+1 loop.
+// The join to splits is what carries the split_role() access check, and the
+// LATERAL aggregate is what keeps item_count and subtotal out of an N+1 loop.
 const char* const BILL_FROM =
     " FROM bills b "
     "   JOIN splits s ON s.id = b.split_id "
@@ -270,11 +270,11 @@ const char* const BILL_FROM =
     "              COUNT(i.id) AS item_count "
     "         FROM bill_items i WHERE i.bill_id = b.id) agg ";
 
-// $1 = bill id, $2 = split id, $3 = owner id.
+// $1 = bill id, $2 = split id, $3 = calling user id (owner or linked member).
 std::string select_one_bill_sql() {
     return std::string("SELECT ") + BILL_COLUMNS + BILL_FROM +
            " WHERE b.id = $1::uuid AND b.split_id = $2::uuid "
-           "   AND s.owner_id = $3::uuid";
+           "   AND split_role(s.id, $3::uuid) IS NOT NULL";
 }
 
 // ── Serialization ────────────────────────────────────────────────────────────
@@ -332,10 +332,12 @@ void register_bill_routes(BsApp& app, DbPool& pool) {
             auto conn = pool.acquire();
             pqxx::work txn(*conn);
 
-            // Ownership is scoped into the query: another user's split yields
-            // no rows, so it is indistinguishable from one that does not exist.
+            // Access is scoped into the query via split_role(): a split the caller
+            // neither owns nor is a member of yields no rows, so it is
+            // indistinguishable from one that does not exist.
             auto owned = txn.exec(
-                "SELECT 1 FROM splits WHERE id = $1::uuid AND owner_id = $2::uuid",
+                "SELECT 1 FROM splits WHERE id = $1::uuid "
+                "   AND split_role(id, $2::uuid) IS NOT NULL",
                 pqxx::params{id, user->id});
             if (owned.empty()) {
                 txn.commit();
@@ -344,7 +346,8 @@ void register_bill_routes(BsApp& app, DbPool& pool) {
 
             auto rows = txn.exec(
                 std::string("SELECT ") + BILL_COLUMNS + BILL_FROM +
-                " WHERE b.split_id = $1::uuid AND s.owner_id = $2::uuid "
+                " WHERE b.split_id = $1::uuid "
+                "   AND split_role(s.id, $2::uuid) IS NOT NULL "
                 " ORDER BY b.date DESC, b.created_at DESC",
                 pqxx::params{id, user->id});
             txn.commit();
@@ -411,7 +414,7 @@ void register_bill_routes(BsApp& app, DbPool& pool) {
 
             auto split = txn.exec(
                 "SELECT currency FROM splits "
-                "  WHERE id = $1::uuid AND owner_id = $2::uuid",
+                "  WHERE id = $1::uuid AND split_role(id, $2::uuid) IS NOT NULL",
                 pqxx::params{id, user->id});
             if (split.empty()) {
                 txn.commit();
@@ -435,7 +438,7 @@ void register_bill_routes(BsApp& app, DbPool& pool) {
                 }
             }
 
-            // Ownership is re-asserted in the INSERT itself rather than trusted
+            // Access is re-asserted in the INSERT itself rather than trusted
             // from the SELECT above. NULLIF turns an absent payer into SQL NULL.
             auto inserted = txn.exec(
                 "INSERT INTO bills "
@@ -444,7 +447,7 @@ void register_bill_routes(BsApp& app, DbPool& pool) {
                 "  SELECT s.id, $2, $3::date, $4, $5::numeric, $6::numeric, "
                 "         $7::numeric, NULLIF($8, '')::uuid "
                 "    FROM splits s "
-                "   WHERE s.id = $1::uuid AND s.owner_id = $9::uuid "
+                "   WHERE s.id = $1::uuid AND split_role(s.id, $9::uuid) IS NOT NULL "
                 "  RETURNING id",
                 pqxx::params{id, store_name, date, currency, tax, tip, fees,
                              payer, user->id});
@@ -497,7 +500,7 @@ void register_bill_routes(BsApp& app, DbPool& pool) {
                 return json_error(404, "Bill not found");
             }
 
-            // Safe without a second ownership check: the bill above is already
+            // Safe without a second access check: the bill above is already
             // proven to belong to the caller's split.
             auto items = txn.exec(
                 "SELECT i.id, i.bill_id, i.name, i.price, i.quantity, "
@@ -633,7 +636,7 @@ void register_bill_routes(BsApp& app, DbPool& pool) {
             auto existing = txn.exec(
                 "SELECT b.id FROM bills b JOIN splits s ON s.id = b.split_id "
                 " WHERE b.id = $1::uuid AND b.split_id = $2::uuid "
-                "   AND s.owner_id = $3::uuid",
+                "   AND split_role(s.id, $3::uuid) IS NOT NULL",
                 pqxx::params{bid, id, user->id});
             if (existing.empty()) {
                 txn.commit();
@@ -658,7 +661,7 @@ void register_bill_routes(BsApp& app, DbPool& pool) {
                 " WHERE s.id = b.split_id "
                 "   AND b.id = " + bid_param + "::uuid" +
                 "   AND b.split_id = " + id_param + "::uuid" +
-                "   AND s.owner_id = " + owner_param + "::uuid" +
+                "   AND split_role(s.id, " + owner_param + "::uuid) IS NOT NULL" +
                 " RETURNING b.id";
 
             auto updated = txn.exec(sql, params);
@@ -709,7 +712,8 @@ void register_bill_routes(BsApp& app, DbPool& pool) {
             auto rows = txn.exec(
                 "DELETE FROM bills b USING splits s "
                 " WHERE s.id = b.split_id AND b.id = $1::uuid "
-                "   AND b.split_id = $2::uuid AND s.owner_id = $3::uuid "
+                "   AND b.split_id = $2::uuid "
+                "   AND split_role(s.id, $3::uuid) IS NOT NULL "
                 " RETURNING b.id",
                 pqxx::params{bid, id, user->id});
             txn.commit();

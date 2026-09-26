@@ -19,14 +19,14 @@
         </div>
       </div>
 
-      <!-- 2a. Not found — an id that doesn't exist, or isn't owned by this
-              user. The API answers 404 for both so it can't be used to probe
-              which split ids exist. -->
+      <!-- 2a. Not found — an id that doesn't exist, or one this user neither
+              owns nor holds a linked seat in. The API answers 404 for both so
+              it can't be used to probe which split ids exist. -->
       <div v-else-if="notFound" class="card mt-4 text-center py-12">
         <h1 class="text-lg font-medium text-gray-900">Split not found</h1>
         <p class="mt-2 text-sm text-gray-500 max-w-sm mx-auto">
-          This split either doesn’t exist or isn’t one of yours. If someone
-          shared a link with you, ask them to add you to it.
+          This split either doesn’t exist or you don’t have access to it. If
+          the owner meant to include you, ask them for an invite link.
         </p>
         <router-link to="/" class="btn-primary inline-block mt-6">
           Back to my splits
@@ -120,6 +120,17 @@
               Created {{ formatDate(split.created_at) }}
             </span>
           </div>
+
+          <!-- A member landed here through an invite link, not by creating the
+               split. Say so, and what that does and doesn't let them do. -->
+          <p
+            v-if="isMember"
+            class="mt-4 rounded-lg bg-primary-50 px-3 py-2 text-sm text-primary-700"
+          >
+            You were invited to this split by its owner. You can add and edit
+            bills, payments and members just like they can; only the owner can
+            invite or remove people.
+          </p>
         </div>
 
         <!-- Members -->
@@ -142,57 +153,158 @@
           <!-- Duplicate names are legal (two people really can both be "Bob"),
                so the row key is the member id, never the name. -->
           <ul v-else class="mt-4 divide-y divide-gray-100">
-            <li
-              v-for="member in members"
-              :key="member.id"
-              class="flex items-center justify-between gap-4 py-3 first:pt-0"
-            >
-              <div class="min-w-0">
-                <div class="flex items-center gap-2">
-                  <span class="text-sm font-medium text-gray-900 truncate">{{ member.name }}</span>
-                  <span
-                    v-if="accountLabel(member)"
-                    class="rounded-full bg-gray-100 text-gray-500 px-2 py-0.5 text-xs"
-                  >
-                    {{ accountLabel(member) }}
-                  </span>
+            <li v-for="member in members" :key="member.id" class="py-3 first:pt-0">
+              <div class="flex items-center justify-between gap-4">
+                <div class="min-w-0">
+                  <div class="flex flex-wrap items-center gap-2">
+                    <span class="text-sm font-medium text-gray-900 truncate">{{ member.name }}</span>
+                    <span
+                      v-if="isYou(member)"
+                      class="rounded-full bg-primary-50 text-primary-700 px-2 py-0.5 text-xs font-medium"
+                    >
+                      You
+                    </span>
+                    <!-- Seat status. Owner and Linked mean an account holds the
+                         seat; Invite pending means a link is out but unclaimed;
+                         no badge means it's just a name for now. -->
+                    <span
+                      v-if="statusLabel(member)"
+                      class="rounded-full px-2 py-0.5 text-xs"
+                      :class="member.invite_pending && !member.linked
+                        ? 'bg-amber-50 text-amber-700'
+                        : 'bg-gray-100 text-gray-600'"
+                    >
+                      {{ statusLabel(member) }}
+                    </span>
+                  </div>
+                  <p v-if="member.email" class="text-xs text-gray-500 truncate">{{ member.email }}</p>
+                  <p v-if="formatDate(member.joined_at)" class="text-xs text-gray-400">
+                    Added {{ formatDate(member.joined_at) }}
+                  </p>
                 </div>
-                <p v-if="member.email" class="text-xs text-gray-500 truncate">{{ member.email }}</p>
-                <p v-if="formatDate(member.joined_at)" class="text-xs text-gray-400">
-                  Added {{ formatDate(member.joined_at) }}
-                </p>
+
+                <!-- Seat management is owner-only (the API answers 403 for a
+                     member), so a member sees no buttons here at all rather
+                     than buttons that fail. The owner's own seat can't be
+                     removed or invited, so it gets none either. -->
+                <div
+                  v-if="isOwner && !member.is_owner"
+                  class="flex shrink-0 flex-wrap items-center justify-end gap-2"
+                >
+                  <!-- Inline confirm for whichever action is pending on this
+                       row, so the row stays visible while you decide. -->
+                  <template v-if="isConfirming(member)">
+                    <span class="text-xs text-gray-600">{{ confirmPrompt(confirming.action) }}</span>
+                    <button
+                      type="button"
+                      class="btn-secondary text-xs px-3 py-1.5 border-red-300 text-red-700 hover:bg-red-50"
+                      :disabled="isBusy(member)"
+                      @click="runConfirmed(member)"
+                    >
+                      {{ isBusy(member) ? busyLabel(confirming.action) : confirmYes(confirming.action) }}
+                    </button>
+                    <button
+                      type="button"
+                      class="btn-secondary text-xs px-3 py-1.5"
+                      :disabled="isBusy(member)"
+                      @click="confirming = null"
+                    >
+                      Cancel
+                    </button>
+                  </template>
+
+                  <template v-else>
+                    <!-- Unlinked, no link out: a fresh invite needs no confirm. -->
+                    <button
+                      v-if="!member.linked && !member.invite_pending"
+                      type="button"
+                      class="btn-primary text-xs px-3 py-1.5"
+                      :disabled="anyBusy"
+                      @click="invite(member, { replace: false })"
+                    >
+                      {{ isBusy(member, 'invite') ? 'Creating link…' : 'Invite' }}
+                    </button>
+
+                    <!-- Link out, not yet claimed. Both of these kill the link
+                         someone may already be holding, so both confirm first. -->
+                    <template v-if="!member.linked && member.invite_pending">
+                      <button
+                        type="button"
+                        class="btn-secondary text-xs px-3 py-1.5"
+                        :disabled="anyBusy"
+                        @click="startConfirm(member, 'reinvite')"
+                      >
+                        New link
+                      </button>
+                      <button
+                        type="button"
+                        class="btn-secondary text-xs px-3 py-1.5"
+                        :disabled="anyBusy"
+                        @click="startConfirm(member, 'revoke')"
+                      >
+                        Revoke
+                      </button>
+                    </template>
+
+                    <button
+                      type="button"
+                      class="btn-secondary text-xs px-3 py-1.5"
+                      :disabled="anyBusy"
+                      @click="startConfirm(member, 'remove')"
+                    >
+                      Remove
+                    </button>
+                  </template>
+                </div>
               </div>
 
-              <!-- Removal is confirmed inline rather than with a dialog, so the
-                   row being removed stays visible while you decide. -->
-              <div v-if="confirmingId === member.id" class="flex shrink-0 items-center gap-2">
-                <span class="text-xs text-gray-600">Remove?</span>
-                <button
-                  type="button"
-                  class="btn-secondary text-xs px-3 py-1.5 border-red-300 text-red-700 hover:bg-red-50"
-                  :disabled="removingId === member.id"
-                  @click="removeMember(member)"
-                >
-                  {{ removingId === member.id ? 'Removing…' : 'Yes, remove' }}
-                </button>
-                <button
-                  type="button"
-                  class="btn-secondary text-xs px-3 py-1.5"
-                  :disabled="removingId === member.id"
-                  @click="confirmingId = null"
-                >
-                  Cancel
-                </button>
-              </div>
-              <button
-                v-else
-                type="button"
-                class="btn-secondary shrink-0 text-xs px-3 py-1.5"
-                :disabled="removingId !== null"
-                @click="confirmRemove(member)"
+              <!-- The invite link, shown exactly once: the API never returns
+                   the token again, only "pending". -->
+              <div
+                v-if="inviteLink && inviteLink.memberId === member.id"
+                class="mt-3 rounded-lg border border-primary-100 bg-primary-50 px-3 py-3"
               >
-                Remove
-              </button>
+                <p class="text-sm font-medium text-primary-700">
+                  Invite link for {{ member.name }}
+                </p>
+                <p v-if="inviteLink.replaced" class="mt-1 text-xs text-primary-700">
+                  The previous link for this seat no longer works.
+                </p>
+                <div class="mt-2 flex flex-col gap-2 sm:flex-row">
+                  <input
+                    :ref="setInviteInput"
+                    :value="inviteLink.url"
+                    type="text"
+                    readonly
+                    class="input flex-1 text-xs font-mono"
+                    aria-label="Invite link"
+                    @focus="$event.target.select()"
+                  />
+                  <button
+                    type="button"
+                    class="btn-primary shrink-0 text-xs px-3 py-1.5"
+                    @click="copyInviteLink"
+                  >
+                    {{ copyState === 'copied' ? 'Copied' : 'Copy link' }}
+                  </button>
+                  <button
+                    type="button"
+                    class="btn-secondary shrink-0 text-xs px-3 py-1.5"
+                    @click="dismissInviteLink"
+                  >
+                    Done
+                  </button>
+                </div>
+                <p v-if="copyState === 'manual'" class="mt-2 text-xs text-primary-700">
+                  Copying isn’t available here — the link is selected above, so
+                  copy it by hand.
+                </p>
+                <p class="mt-2 text-xs text-primary-700">
+                  This link is shown once. Anyone who opens it while signed in
+                  joins this split as {{ member.name }}, so send it only to
+                  them. If it goes astray, use Revoke or New link.
+                </p>
+              </div>
             </li>
           </ul>
 
@@ -229,13 +341,59 @@
 
             <p v-if="addError" class="text-sm text-red-600">{{ addError }}</p>
             <p class="text-xs text-gray-400">
-              Emails are stored for later — no invite is sent.
+              Adding a name creates a seat; no email is sent.
+              <template v-if="isOwner">
+                To give someone access to this split, use Invite on their row
+                and send them the link.
+              </template>
+              <template v-else>Only the owner can send invite links.</template>
             </p>
 
             <button type="submit" class="btn-primary" :disabled="adding">
               {{ adding ? 'Adding…' : 'Add member' }}
             </button>
           </form>
+
+          <!-- Leaving unlinks the account from the seat; the seat itself and
+               everything recorded against it stay in the ledger. The owner
+               can't leave (the API says 400) — they archive instead. -->
+          <div v-if="isMember" class="mt-6 border-t border-gray-100 pt-4">
+            <h3 class="text-sm font-medium text-gray-900">Leave this split</h3>
+            <p class="mt-1 text-xs text-gray-500">
+              Your account is unlinked from your seat and this split leaves
+              your list. Your payments and allocations stay in the ledger under
+              your name. To come back, you’d need a new invite link from the
+              owner.
+            </p>
+            <p v-if="leaveError" class="mt-2 text-sm text-red-600">{{ leaveError }}</p>
+            <div v-if="confirmingLeave" class="mt-3 flex items-center gap-2">
+              <span class="text-xs text-gray-600">Leave this split?</span>
+              <button
+                type="button"
+                class="btn-secondary text-xs px-3 py-1.5 border-red-300 text-red-700 hover:bg-red-50"
+                :disabled="leaving"
+                @click="leave"
+              >
+                {{ leaving ? 'Leaving…' : 'Yes, leave' }}
+              </button>
+              <button
+                type="button"
+                class="btn-secondary text-xs px-3 py-1.5"
+                :disabled="leaving"
+                @click="confirmingLeave = false"
+              >
+                Cancel
+              </button>
+            </div>
+            <button
+              v-else
+              type="button"
+              class="btn-secondary mt-3 text-xs px-3 py-1.5 border-red-300 text-red-700 hover:bg-red-50"
+              @click="confirmingLeave = true"
+            >
+              Leave this split
+            </button>
+          </div>
         </section>
 
         <!-- Bills. Loads separately from the split so a bills failure leaves
@@ -375,8 +533,8 @@
 </template>
 
 <script setup>
-import { ref, nextTick, onMounted, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { ref, computed, nextTick, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import AppLayout from '@/components/AppLayout.vue'
 import { useSplitsStore } from '@/stores/splits'
@@ -384,8 +542,9 @@ import { useBillsStore } from '@/stores/bills'
 import { typeLabel, memberLabel, itemLabel, billLabel, formatDate, formatDay, formatMoney } from '@/lib/format'
 import { useAuthStore } from '@/stores/auth'
 
-const route = useRoute()
-const store = useSplitsStore()
+const route  = useRoute()
+const router = useRouter()
+const store  = useSplitsStore()
 const billsStore = useBillsStore()
 const auth  = useAuthStore()
 
@@ -400,6 +559,12 @@ const loading  = ref(true)
 const error    = ref('')
 const notFound = ref(false)
 
+// `role` is the caller's relationship to this split, decided by the server.
+// Owner-only controls are hidden — not merely disabled — for a member, because
+// every one of them would come back 403.
+const isOwner  = computed(() => split.value?.role === 'owner')
+const isMember = computed(() => split.value?.role === 'member')
+
 // Rename
 const editingName = ref(false)
 const nameDraft   = ref('')
@@ -413,10 +578,25 @@ const newEmail = ref('')
 const adding   = ref(false)
 const addError = ref('')
 
-// Remove member
-const confirmingId = ref(null)
-const removingId   = ref(null)
-const memberError  = ref('')
+// Seat actions — remove / invite / re-invite / revoke. One inline confirm and
+// one in-flight request at a time, keyed by member id so the right row shows
+// its own state.
+const confirming  = ref(null)   // { id, action: 'remove' | 'reinvite' | 'revoke' }
+const busy        = ref(null)   // { id, action } while a request is in flight
+const memberError = ref('')
+const anyBusy     = computed(() => busy.value !== null)
+
+// The invite link is returned once and never listed again, so it is held here
+// until dismissed. `replaced` is true when it superseded an earlier link.
+const inviteLink  = ref(null)   // { memberId, url, replaced }
+const copyState   = ref('')     // '' | 'copied' | 'manual'
+let   inviteInput = null        // the readonly <input>, for the select fallback
+let   copiedTimer = null
+
+// Leave (member only)
+const confirmingLeave = ref(false)
+const leaving         = ref(false)
+const leaveError      = ref('')
 
 // Bills — their own loading/error state so a bills failure never blanks out
 // the split header or the members list.
@@ -436,8 +616,7 @@ async function load() {
   error.value    = ''
   notFound.value = false
   cancelRename()
-  confirmingId.value = null
-  memberError.value  = ''
+  resetMemberState()
   // Held true so the previous split’s bills can’t flash in the new one.
   billsLoading.value = true
   resetBillState()
@@ -571,30 +750,176 @@ async function submitMember() {
   }
 }
 
-function confirmRemove(member) {
-  memberError.value  = ''
-  confirmingId.value = member.id
+function resetMemberState() {
+  confirming.value      = null
+  busy.value            = null
+  memberError.value     = ''
+  inviteLink.value      = null
+  copyState.value       = ''
+  confirmingLeave.value = false
+  leaveError.value      = ''
 }
 
-async function removeMember(member) {
-  if (removingId.value) return
-  removingId.value  = member.id
+// ── Seat status ─────────────────────────────────────────────────────────────
+
+function isYou(member) {
+  return !!member.user_id && member.user_id === auth.user?.id
+}
+
+// Owner and Linked both mean an account holds the seat; a pending invite means
+// a link is out but nobody has claimed it yet. Plain names get no badge.
+function statusLabel(member) {
+  if (member.is_owner) return 'Owner'
+  if (member.linked) return 'Linked'
+  if (member.invite_pending) return 'Invite pending'
+  return ''
+}
+
+// ── Confirmed seat actions ──────────────────────────────────────────────────
+
+function isConfirming(member) {
+  return confirming.value?.id === member.id
+}
+
+function isBusy(member, action) {
+  if (busy.value?.id !== member.id) return false
+  return action ? busy.value.action === action : true
+}
+
+function startConfirm(member, action) {
   memberError.value = ''
-  try {
-    await store.removeMember(split.value.id, member.id)
-    confirmingId.value = null
-  } catch (e) {
-    memberError.value = e.message
-  } finally {
-    removingId.value = null
+  confirming.value  = { id: member.id, action }
+}
+
+const PROMPTS = {
+  remove:   'Remove?',
+  // Both of these invalidate a link the owner may already have sent.
+  reinvite: 'Replace the link? The one you sent stops working.',
+  revoke:   'Revoke? The link you sent stops working.',
+}
+const YES   = { remove: 'Yes, remove',  reinvite: 'Yes, new link',  revoke: 'Yes, revoke' }
+const BUSY  = { remove: 'Removing…',    reinvite: 'Creating link…', revoke: 'Revoking…', invite: 'Creating link…' }
+
+function confirmPrompt(action) { return PROMPTS[action] ?? 'Are you sure?' }
+function confirmYes(action)    { return YES[action] ?? 'Yes' }
+function busyLabel(action)     { return BUSY[action] ?? 'Working…' }
+
+function runConfirmed(member) {
+  const action = confirming.value?.action
+  if (action === 'remove')   return removeMember(member)
+  if (action === 'reinvite') return invite(member, { replace: true })
+  if (action === 'revoke')   return revokeInvite(member)
+}
+
+// Owner-only actions fail with 403 if the caller has stopped being the owner
+// since the page loaded. The store's message says so; refetching afterwards
+// makes the controls match the role the server now reports.
+function handleSeatError(e) {
+  memberError.value = e.message
+  if (e.status === 403 && split.value) {
+    store.fetchSplit(split.value.id).catch(() => {})
   }
 }
 
-// A member with a user_id is backed by a real account; everyone else is just a
-// name on a list. Worth marking, quietly.
-function accountLabel(member) {
-  if (!member.user_id) return ''
-  return member.user_id === auth.user?.id ? 'you' : 'account'
+async function removeMember(member) {
+  if (busy.value) return
+  busy.value        = { id: member.id, action: 'remove' }
+  memberError.value = ''
+  try {
+    await store.removeMember(split.value.id, member.id)
+    confirming.value = null
+    if (inviteLink.value?.memberId === member.id) dismissInviteLink()
+  } catch (e) {
+    handleSeatError(e)
+  } finally {
+    busy.value = null
+  }
+}
+
+// ── Invites ─────────────────────────────────────────────────────────────────
+
+// The token comes back exactly once; the member list only ever reports
+// `invite_pending`. So the full URL is built here and held until dismissed.
+async function invite(member, { replace }) {
+  if (busy.value) return
+  busy.value        = { id: member.id, action: replace ? 'reinvite' : 'invite' }
+  memberError.value = ''
+  try {
+    const { invite_path } = await store.inviteMember(split.value.id, member.id)
+    confirming.value = null
+    copyState.value  = ''
+    inviteLink.value = {
+      memberId: member.id,
+      url: window.location.origin + invite_path,
+      replaced: replace,
+    }
+    nextTick(() => inviteInput?.focus())
+  } catch (e) {
+    handleSeatError(e)
+  } finally {
+    busy.value = null
+  }
+}
+
+async function revokeInvite(member) {
+  if (busy.value) return
+  busy.value        = { id: member.id, action: 'revoke' }
+  memberError.value = ''
+  try {
+    await store.revokeInvite(split.value.id, member.id)
+    confirming.value = null
+    if (inviteLink.value?.memberId === member.id) dismissInviteLink()
+  } catch (e) {
+    handleSeatError(e)
+  } finally {
+    busy.value = null
+  }
+}
+
+// Only one invite box is ever open, so a single element ref is enough; a
+// function ref is used because the input lives inside a v-for.
+function setInviteInput(el) {
+  inviteInput = el ?? null
+}
+
+async function copyInviteLink() {
+  if (!inviteLink.value) return
+  clearTimeout(copiedTimer)
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('no clipboard')
+    await navigator.clipboard.writeText(inviteLink.value.url)
+    copyState.value = 'copied'
+    copiedTimer = setTimeout(() => { if (copyState.value === 'copied') copyState.value = '' }, 2000)
+  } catch {
+    // No clipboard API (plain-http origins, some embedded browsers): leave the
+    // link selected so a manual copy is one keystroke away.
+    inviteInput?.focus()
+    inviteInput?.select()
+    copyState.value = 'manual'
+  }
+}
+
+function dismissInviteLink() {
+  clearTimeout(copiedTimer)
+  inviteLink.value = null
+  copyState.value  = ''
+}
+
+// ── Leave ───────────────────────────────────────────────────────────────────
+
+async function leave() {
+  if (leaving.value) return
+  leaving.value    = true
+  leaveError.value = ''
+  const id = split.value.id
+  try {
+    // The store clears `current` and drops the split from the list itself.
+    await store.leaveSplit(id)
+    router.push('/')
+  } catch (e) {
+    leaveError.value = e.message
+    leaving.value    = false
+  }
 }
 
 const TYPE_LABELS = { one_time: 'One-time', ongoing: 'Ongoing' }

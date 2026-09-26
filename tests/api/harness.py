@@ -146,6 +146,28 @@ class Client:
         )
 
 
+def make_collaborator(owner, split_id, name="Collaborator"):
+    """Adds a member seat to `split_id`, invites it, and has a brand-new user
+    claim the invite. Returns (collaborator_client, member).
+
+    This is the whole invite-link flow in one call, so collaboration tests read
+    as "given a member, ..." rather than re-enacting the handshake each time.
+    Every assertion inside is a real contract requirement, so a failure here is
+    a failure of the invite flow itself, not of the test that called it.
+    """
+    member = owner.make_member(split_id, name=name)
+    inv = owner.post(f"/api/splits/{split_id}/members/{member['id']}/invite")
+    assert inv.status == 200, f"invite failed: {inv}"
+    token = inv.json["invite_token"]
+    assert len(token) == 32, f"invite token should be 32 hex chars: {token!r}"
+
+    collaborator = new_user(display_name=name)
+    claim = collaborator.post(f"/api/invites/{token}/claim")
+    assert claim.status == 200, f"claim failed: {claim}"
+    assert claim.json["split_id"] == split_id
+    return collaborator, member
+
+
 def new_user(display_name=None):
     """A freshly registered, logged-in client. Each test gets its own users so
     tests never contend for the same rows and can run in any order."""

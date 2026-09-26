@@ -45,6 +45,15 @@ const routes = [
     meta: { requiresAuth: true }
   },
   {
+    // Claiming an invite requires a session; the guard sends a signed-out
+    // visitor to /login with ?redirect back here, so the claim completes in
+    // the same visit once they have signed up or signed in.
+    path: '/invite/:token',
+    name: 'Invite',
+    component: () => import('@/views/InviteView.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
     path: '/share/:token',
     name: 'ShareView',
     component: () => import('@/views/ShareView.vue'),

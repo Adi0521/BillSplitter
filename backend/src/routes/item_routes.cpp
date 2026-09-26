@@ -270,16 +270,17 @@ void register_item_routes(BsApp& app, DbPool& pool) {
             pqxx::work txn(*conn);
 
             // The join to splits is the authorization: the bill is only visible
-            // through a split this user owns. LEFT JOIN to the items so one
-            // round trip distinguishes the two "empty" answers — zero rows means
-            // no such bill for this user (404), while one row with a NULL item
-            // id means an owned bill with no items yet (200 []).
+            // through a split this user owns or is a linked member of (split_role).
+            // LEFT JOIN to the items so one round trip distinguishes the two "empty"
+            // answers — zero rows means no such bill for this user (404), while one
+            // row with a NULL item id means an accessible bill with no items yet
+            // (200 []).
             auto rows = txn.exec(
                 "SELECT " + item_columns("i.") +
                 "  FROM bills b"
                 "  JOIN splits s ON s.id = b.split_id"
                 "  LEFT JOIN bill_items i ON i.bill_id = b.id"
-                " WHERE b.id = $1::uuid AND s.owner_id = $2::uuid"
+                " WHERE b.id = $1::uuid AND split_role(s.id, $2::uuid) IS NOT NULL"
                 " ORDER BY i.created_at, i.id",
                 pqxx::params{bill_id, user->id});
             txn.commit();
@@ -349,15 +350,16 @@ void register_item_routes(BsApp& app, DbPool& pool) {
             pqxx::work txn(*conn);
 
             // INSERT ... SELECT: the row only comes into existence if the CTE
-            // finds this bill on a split owned by this user, so ownership is
-            // enforced by the statement itself. No rows inserted means the bill
-            // is not the caller's (or does not exist) — 404, never 403.
+            // finds this bill on a split this user may access (split_role), so
+            // authorization is enforced by the statement itself. No rows inserted
+            // means the bill is not the caller's (or does not exist) — 404, never 403.
             auto rows = txn.exec(
                 "WITH target AS ("
                 "    SELECT b.id, b.currency"
                 "      FROM bills b"
                 "      JOIN splits s ON s.id = b.split_id"
-                "     WHERE b.id = $1::uuid AND s.owner_id = $2::uuid)"
+                "     WHERE b.id = $1::uuid"
+                "       AND split_role(s.id, $2::uuid) IS NOT NULL)"
                 " INSERT INTO bill_items (bill_id, name, price, quantity, currency)"
                 " SELECT target.id, $3::text, $4::numeric, $5::int,"
                 "        COALESCE($6::text, target.currency)"
@@ -484,7 +486,7 @@ void register_item_routes(BsApp& app, DbPool& pool) {
                 "   AND bill_items.bill_id = " + bill_param + "::uuid"
                 "   AND b.id = bill_items.bill_id"
                 "   AND s.id = b.split_id"
-                "   AND s.owner_id = " + owner_param + "::uuid"
+                "   AND split_role(s.id, " + owner_param + "::uuid) IS NOT NULL"
                 " RETURNING " + item_columns("bill_items.");
 
             auto conn = pool.acquire();
@@ -543,7 +545,7 @@ void register_item_routes(BsApp& app, DbPool& pool) {
                 "   AND bill_items.bill_id = $2::uuid"
                 "   AND b.id = bill_items.bill_id"
                 "   AND s.id = b.split_id"
-                "   AND s.owner_id = $3::uuid"
+                "   AND split_role(s.id, $3::uuid) IS NOT NULL"
                 " RETURNING bill_items.id",
                 pqxx::params{item_id, bill_id, user->id});
 

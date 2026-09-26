@@ -18,9 +18,11 @@
 #include "routes/public_routes.h"
 #include "routes/receipt_routes.h"
 #include "routes/export_routes.h"
+#include "routes/invite_routes.h"
 // Phase 5/7 route headers will be #include'd here as they are implemented:
 // #include "routes/payment_routes.h"
 // #include "routes/export_routes.h"
+#include "routes/invite_routes.h"
 // #include "routes/currency_routes.h"
 
 static std::string require_env(const char* name) {
@@ -85,6 +87,7 @@ int main() {
         register_public_routes(app, pool);
         register_receipt_routes(app, pool);
         register_export_routes(app, pool);
+        register_invite_routes(app, pool);
         // register_payment_routes(app, pool);
         // register_currency_routes(app, pool);
 

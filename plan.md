@@ -453,9 +453,14 @@ cd frontend && npm install && npm run dev
 ### Phase 2 — Splits & Members
 - [x] Full CRUD for splits
 - [x] Member add/remove
-- [ ] Member invite — deferred: sends email, and no mail service is configured
-      (Phase 1 dropped SendGrid when auth moved to passwords). Member emails are
-      stored, nothing is sent. Revisit alongside Phase 6's "notify all".
+- [x] Member invite — done as **invite links**, not email. Emails are never
+      verified here, so matching seats to accounts by email would let anyone
+      register as someone else's address and see their splits. The owner mints
+      a one-use link per seat and sends it however they like; the token is the
+      secret (same model as `share_token`). Linked members are full
+      collaborators; only archive / remove member / manage invites / regenerate
+      share link stay owner-only (the API's only 403s). Access is defined once,
+      in the SQL function `split_role()` (migration 005).
 - [x] SplitsView.vue + SplitDetailView.vue + NewSplitView.vue
 
 ### Phase 3 — Bills & Items

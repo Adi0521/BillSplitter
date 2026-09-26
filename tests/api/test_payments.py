@@ -23,7 +23,7 @@ The points that carry the most weight here:
 import unittest
 from decimal import Decimal
 
-from harness import ApiTestCase, BAD_IDS, MISSING_UUID, Client, new_user
+from harness import ApiTestCase, BAD_IDS, MISSING_UUID, Client, make_collaborator, new_user
 
 # BAD_IDS contains a raw space, which http.client refuses to put in a request
 # line (InvalidURL, raised before anything is sent). Encoding just the space
@@ -484,6 +484,141 @@ class TestPaymentBadIds(PaymentCase):
             with self.subTest(body=body):
                 r = c.post(f"/api/splits/{split['id']}/payments", body)
                 self.assertError(r, 400)
+
+
+class TestCollaborator(PaymentCase):
+    """A linked member records, lists and deletes payments exactly as the owner
+    does. Payments are between seats, not accounts: the member pays from the
+    seat they claimed, and the numbers land where they would have had the
+    owner typed the same payment in."""
+
+    def build(self):
+        owner = new_user()
+        split, (alice, bob) = self.make_split_with_members(owner)
+        collab, seat = make_collaborator(owner, split["id"], name="Collab")
+        return owner, collab, split, alice, bob, seat
+
+    def test_a_member_can_record_a_payment_from_their_own_seat(self):
+        owner, collab, split, alice, bob, seat = self.build()
+        r = self.pay(collab, split["id"], from_member=seat["id"],
+                     to_member=alice["id"], amount="12.50", method="cash")
+        self.assertStatus(r, 201)
+        self.assertEqual(set(r.json), PAYMENT_KEYS)
+        self.assertEqual(r.json["from_member"], seat["id"])
+        self.assertEqual(r.json["from_name"], "Collab")
+        self.assertEqual(r.json["to_member"], alice["id"])
+        self.assertEqual(r.json["amount"], "12.5000")
+        self.assertEqual(r.json["currency"], split["currency"],
+                         "an omitted currency inherits the split's for a member too")
+        # The owner sees it in the same list: one ledger.
+        listed = owner.get(f"/api/splits/{split['id']}/payments")
+        self.assertStatus(listed, 200)
+        self.assertEqual([p["id"] for p in listed.json], [r.json["id"]])
+
+    def test_a_member_can_record_a_payment_between_two_other_seats(self):
+        """Nothing ties the recorder to the payer: a member entering "Bob paid
+        Alice" is as valid as the owner entering it."""
+        owner, collab, split, alice, bob, seat = self.build()
+        r = self.pay(collab, split["id"], from_member=bob["id"],
+                     to_member=alice["id"], amount="3.00")
+        self.assertStatus(r, 201)
+        self.assertEqual(r.json["from_name"], "Bob")
+        self.assertEqual(r.json["to_name"], "Alice")
+
+    def test_a_members_list_is_byte_identical_to_the_owners(self):
+        owner, collab, split, alice, bob, seat = self.build()
+        self.make_payment(owner, split["id"], bob["id"], alice["id"], amount="20.00")
+        self.make_payment(collab, split["id"], seat["id"], alice["id"], amount="5.00")
+        url = f"/api/splits/{split['id']}/payments"
+        mine, theirs = owner.get(url), collab.get(url)
+        self.assertStatus(mine, 200)
+        self.assertStatus(theirs, 200)
+        self.assertEqual(len(mine.json), 2)
+        self.assertEqual(mine.body, theirs.body,
+                         "the list must not depend on who is asking")
+
+    def test_a_member_can_delete_a_payment_the_owner_recorded(self):
+        owner, collab, split, alice, bob, seat = self.build()
+        payment = self.make_payment(owner, split["id"], bob["id"], alice["id"])
+        r = collab.delete(f"/api/splits/{split['id']}/payments/{payment['id']}")
+        self.assertStatus(r, 200)
+        self.assertEqual(r.json, {"message": "Deleted"})
+        self.assertEqual(owner.get(f"/api/splits/{split['id']}/payments").json, [])
+
+    def test_a_member_gets_the_same_400s_as_the_owner(self):
+        """A member is not a stranger: a bad body is 400 (not 404), with the
+        same message the owner would get."""
+        owner, collab, split, alice, bob, seat = self.build()
+        stranger_seat = owner.make_member(owner.make_split()["id"], "Zed")
+        bodies = (
+            {"from_member": seat["id"], "to_member": seat["id"], "amount": "1.00"},
+            {"from_member": seat["id"], "to_member": alice["id"], "amount": "0"},
+            {"from_member": stranger_seat["id"], "to_member": alice["id"],
+             "amount": "1.00"},
+        )
+        for body in bodies:
+            with self.subTest(body=body):
+                mine = owner.post(f"/api/splits/{split['id']}/payments", body)
+                theirs = collab.post(f"/api/splits/{split['id']}/payments", body)
+                self.assertError(mine, 400)
+                self.assertError(theirs, 400)
+                self.assertEqual(mine.json, theirs.json)
+
+    def test_a_members_payment_moves_the_summary_exactly_as_the_owners_would(self):
+        """Two identical splits, the same payment recorded once by the owner
+        and once by a member: the two summaries agree to the digit, which is
+        the whole point of "between seats, not accounts"."""
+        def scenario(recorded_by_member):
+            owner = new_user()
+            split = owner.make_split()
+            alice = owner.make_member(split["id"], "Alice")
+            collab, seat = make_collaborator(owner, split["id"], name="Collab")
+            bill = owner.make_bill(split["id"], tax="10.00", payer_member_id=alice["id"])
+            item = owner.make_item(bill["id"], price="100.00")
+            self.assertStatus(owner.allocate(bill["id"], item["id"], "ratio",
+                [{"member_id": alice["id"], "ratio": "60"},
+                 {"member_id": seat["id"], "ratio": "40"}]), 200)
+            recorder = collab if recorded_by_member else owner
+            self.make_payment(recorder, split["id"], seat["id"], alice["id"],
+                              amount="4.00")
+            summary = owner.get(f"/api/splits/{split['id']}/summary")
+            self.assertStatus(summary, 200)
+            usd = next(g for g in summary.json["by_currency"] if g["currency"] == "USD")
+            return {m["name"]: m for m in usd["members"]}, usd["settlements"]
+
+        by_owner, settle_owner = scenario(recorded_by_member=False)
+        by_member, settle_member = scenario(recorded_by_member=True)
+
+        for name in ("Alice", "Collab"):
+            with self.subTest(member=name):
+                for field in ("owes", "fronted", "payments_made",
+                              "payments_received", "balance"):
+                    self.assertEqual(by_owner[name][field], by_member[name][field],
+                                     f"{name}.{field} differs by who recorded it")
+        self.assertEqual(by_member["Collab"]["owes"], "44.0000")
+        self.assertEqual(by_member["Collab"]["payments_made"], "4.0000")
+        self.assertEqual(by_member["Collab"]["balance"], "-40.0000")
+        self.assertEqual(by_member["Alice"]["payments_received"], "4.0000")
+        self.assertEqual(by_member["Alice"]["balance"], "40.0000")
+        self.assertEqual([t["amount"] for t in settle_owner],
+                         [t["amount"] for t in settle_member])
+        self.assertEqual(settle_member[0]["amount"], "40.0000")
+
+    def test_a_member_of_one_split_is_still_a_stranger_to_another(self):
+        """Linking to split A grants nothing on the same owner's split B: the
+        stranger 404 is unchanged, on every verb."""
+        owner, collab, split, alice, bob, seat = self.build()
+        other, (carol, dave) = self.make_split_with_members(owner, names=("Carol", "Dave"))
+        payment = self.make_payment(owner, other["id"], dave["id"], carol["id"])
+        self.assertError(collab.get(f"/api/splits/{other['id']}/payments"), 404)
+        self.assertError(
+            collab.post(f"/api/splits/{other['id']}/payments",
+                        {"from_member": dave["id"], "to_member": carol["id"],
+                         "amount": "1.00"}), 404)
+        self.assertError(
+            collab.delete(f"/api/splits/{other['id']}/payments/{payment['id']}"), 404)
+        still = owner.get(f"/api/splits/{other['id']}/payments").json
+        self.assertEqual([p["id"] for p in still], [payment["id"]])
 
 
 if __name__ == "__main__":
