@@ -18,12 +18,18 @@
 
     <!-- Page content -->
     <main class="flex-1">
+      <!-- Post-sign-in notices render above whatever page the Google callback
+           landed on, and nothing at all when there are no flags to report. -->
+      <div class="mx-auto max-w-3xl px-6 pt-6 empty:hidden">
+        <SignInNotices />
+      </div>
       <slot />
     </main>
   </div>
 </template>
 
 <script setup>
+import SignInNotices from '@/components/SignInNotices.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useRouter } from 'vue-router'
 

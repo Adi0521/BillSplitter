@@ -465,6 +465,93 @@ and normalization land with the rest of Phase 7.
 
 ---
 
+## Sign in with Google
+
+Google sign-in exists for one reason beyond convenience: **Google tells us
+whether it has verified the address.** Registration here only ever checked that
+an email contained an `@`, so an address was an unproven claim. A verified one
+can safely be used to match a person to a split seat — see "Matching seats by
+email" below — and an unverified one cannot.
+
+| Method | Path | Response |
+|---|---|---|
+| GET | `/api/auth/google/start` | 302 to Google's consent screen |
+| GET | `/api/auth/google/callback?code=&state=` | 302 back to the app, session cookie set |
+
+The redirect URI registered with Google is `{APP_BASE_URL}/api/auth/google/callback`.
+Because the frontend proxies `/api/*` to the backend, the browser sees one
+origin throughout, so the session cookie is set on the site the user is actually
+on — the same property that makes `SameSite=Lax` work everywhere else.
+
+`state` is required, random per attempt, stored in a short-lived `HttpOnly`
+cookie and compared on return. A callback with a missing or mismatched `state`
+is rejected without touching the database.
+
+The authorization code is exchanged **server-side**, over TLS, directly with
+Google. Because the ID token arrives that way rather than via the browser, its
+signature does not need to be re-verified locally — decoding the payload is
+enough. A token arriving by any other path would not be.
+
+### Account linking — the rules that prevent a takeover
+
+Both sign-in methods coexist, which creates a real attack: register with a
+password as `someone@gmail.com` (no verification required, so anyone can), wait,
+and inherit whatever that person later does. The rules below exist to defeat it.
+
+Given a Google identity with subject `sub` and address `email`:
+
+| Situation | What happens |
+|---|---|
+| A user already has this `google_sub` | Sign them in. Their address is refreshed from Google. |
+| No `sub` match; a user has this `email` and **`email_verified` is true** | Link `sub` to that account and sign in. The address was already proven. |
+| No `sub` match; a user has this `email` and **`email_verified` is false** | **Google wins.** Link `sub`, set `email_verified`, and **clear the password**. |
+| No match at all | Create an account: `google_sub` set, `email_verified` true, no password. |
+
+The third row is the important one. That account's address was never proven, so
+it has no legitimate claim to it, while the Google user demonstrably controls
+it. Clearing the password is what evicts a squatter — and it does not lock out a
+legitimate owner, who can still sign in with Google. It **is** destructive, so
+it must be visible: the account keeps all its data, and the sign-in response
+reports `password_cleared: true` so the UI can say what happened.
+
+A user whose password was cleared and who has no other way in cannot recover it;
+there is no password reset. That is a known gap, tracked in plan.md.
+
+### Password login after this change
+
+`password_hash` is now nullable. A password login against a Google-only account
+must fail with the **same** 401 and the **same message** as a wrong password —
+"this account has no password" tells an attacker the address is registered.
+
+### Matching seats by email
+
+After any sign-in that leaves `email_verified` true, every unlinked seat whose
+`email` matches the account's (case-insensitively) is linked to it, by the SQL
+function `link_seats_by_verified_email()` from migration 006. The rules are in
+the function, not the caller:
+
+- the account's `email_verified` must be true — **checked inside the function**,
+  never taken on trust from the call site
+- a seat already linked to someone is never reassigned
+- a split where this user already holds a seat is skipped
+
+So adding "Sam, sam@gmail.com" to a split means Sam sees it the moment he signs
+in with Google, with no link to send. Adding "Sam" with no address, or an
+address belonging to a password-only account, links nothing.
+
+The sign-in response reports `seats_linked` so the UI can say "you were added to
+2 splits".
+
+### Testing
+
+The identity provider is behind a seam. With `AUTH_FAKE_IDENTITY=1` the callback
+accepts a crafted code describing an identity instead of calling Google, which
+is what lets the suite drive the whole flow offline and deterministically. The
+server logs a prominent warning at startup when it is active, and it is never
+set in a deployed environment.
+
+---
+
 ## Phase 6 — Split summary
 
 Everything owed across every bill in a split, net of who fronted what and who

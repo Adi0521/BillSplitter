@@ -7,6 +7,7 @@
 #include "auth/session_sweeper.h"
 #include "db/db_pool.h"
 #include "routes/auth_routes.h"
+#include "routes/google_routes.h"
 #include "routes/member_routes.h"
 #include "routes/split_routes.h"
 #include "routes/bill_routes.h"
@@ -76,6 +77,7 @@ int main() {
             .origin(app_base_url);
 
         register_auth_routes(app, pool);
+        register_google_routes(app, pool);
         register_split_routes(app, pool);
         register_member_routes(app, pool);
         register_bill_routes(app, pool);

@@ -154,6 +154,7 @@ Put the Transaction Pooler URI in `backend/.env` as `DATABASE_URL`, then run
 | `DATABASE_URL` | yes | — | PostgreSQL connection string |
 | `APP_BASE_URL` | no | `http://localhost:5173` | Allowed CORS origin |
 | `PORT` | no | `8080` | Backend listen port |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | no | — | Enable Google sign-in; absent → 503 |
 | `LOGIN_MAX_FAILURES` | no | `10` | Failed sign-ins per email+IP before a 429 |
 | `LOGIN_THROTTLE_WINDOW_SECONDS` | no | `900` | Window those failures are counted over |
 
@@ -178,6 +179,8 @@ Implemented today:
 | POST | `/api/auth/register` | Create account; sets session cookie |
 | POST | `/api/auth/login` | Log in; sets session cookie |
 | POST | `/api/auth/logout` | Invalidate session |
+| GET | `/api/auth/google/start` | Begin Google sign-in (302 to Google) |
+| GET | `/api/auth/google/callback` | Finish it; sets the session cookie |
 | GET | `/api/auth/me` | Current user |
 | GET | `/api/splits` | List splits (`?archived=true` to include archived) |
 | POST | `/api/splits` | Create a split; adds the owner as first member |

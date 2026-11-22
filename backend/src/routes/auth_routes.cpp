@@ -1,5 +1,6 @@
 #include "routes/auth_routes.h"
 #include "auth/auth.h"
+#include "auth/cookie_policy.h"
 #include "auth/login_throttle.h"
 #include "auth/middleware.h"
 #include <crow.h>
@@ -19,65 +20,12 @@ static std::size_t env_size(const char* name, std::size_t fallback) {
     return fallback;
 }
 
-// Cookie attributes, derived once at startup.
-//
-// Two deployment shapes need different answers, and getting it wrong fails
-// silently — the browser simply declines to send the cookie and every request
-// after login looks unauthenticated:
-//
-//   same-origin  (frontend proxies /api to the backend)  SameSite=Lax
-//   cross-origin (frontend and API on different domains) SameSite=None; Secure
-//
-// SameSite=Lax is the safer default and the reason DEPLOYMENT.md recommends the
-// proxy. "None" is only honoured alongside "Secure", so it is forced on.
-struct CookiePolicy {
-    std::string same_site = "Lax";
-    bool        secure    = false;
-
-    std::string attributes(long max_age_seconds) const {
-        std::string out = "; HttpOnly; Path=/; SameSite=" + same_site;
-        if (secure) out += "; Secure";
-        out += "; Max-Age=" + std::to_string(max_age_seconds);
-        return out;
-    }
-};
-
-static CookiePolicy cookie_policy() {
-    CookiePolicy p;
-
-    if (const char* ss = std::getenv("SESSION_COOKIE_SAMESITE")) {
-        const std::string v(ss);
-        if (v == "None" || v == "none")      p.same_site = "None";
-        else if (v == "Strict" || v == "strict") p.same_site = "Strict";
-        else                                  p.same_site = "Lax";
-    }
-
-    // "auto" (the default) means: secure whenever the app is served over https.
-    // That keeps http://localhost working in development without a flag, and
-    // makes a real deployment secure without remembering one.
-    const char* sec = std::getenv("SESSION_COOKIE_SECURE");
-    const std::string mode = sec ? std::string(sec) : "auto";
-    if (mode == "true" || mode == "1") {
-        p.secure = true;
-    } else if (mode == "false" || mode == "0") {
-        p.secure = false;
-    } else {
-        const char* base = std::getenv("APP_BASE_URL");
-        p.secure = base && std::string(base).rfind("https://", 0) == 0;
-    }
-
-    // A browser ignores SameSite=None without Secure, which would drop the
-    // cookie entirely. Correcting it beats honouring an unusable combination.
-    if (p.same_site == "None" && !p.secure) {
-        CROW_LOG_WARNING << "auth: SESSION_COOKIE_SAMESITE=None requires Secure; "
-                            "enabling Secure. Cross-site cookies need HTTPS.";
-        p.secure = true;
-    }
-    return p;
-}
-
-static const CookiePolicy  COOKIE          = cookie_policy();
-static const std::string   SESSION_COOKIE_OPTS = COOKIE.attributes(2592000);  // 30 days
+// Cookie attributes come from auth/cookie_policy.h, which is also what
+// google_routes.cpp uses: the Google callback sets this very same session
+// cookie, and two independently derived copies of the SameSite/Secure rule
+// would eventually disagree.
+static const CookiePolicy  COOKIE               = cookie_policy();
+static const std::string   SESSION_COOKIE_OPTS  = COOKIE.attributes(SESSION_COOKIE_MAX_AGE);
 static const std::string   SESSION_COOKIE_CLEAR = COOKIE.attributes(0);
 
 void register_auth_routes(BsApp& app, DbPool& pool) {

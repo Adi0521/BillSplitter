@@ -235,13 +235,18 @@
 
 <script setup>
 import { ref, computed, watch, onMounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import AppLayout from '@/components/AppLayout.vue'
 import { useSplitsStore } from '@/stores/splits'
+import { useAuthStore } from '@/stores/auth'
 import { typeLabel, memberLabel, formatDate, pluralize } from '@/lib/format'
 
 const store = useSplitsStore()
 const { splits } = storeToRefs(store)
+const auth   = useAuthStore()
+const route  = useRoute()
+const router = useRouter()
 
 const TABS = [
   { id: 'mine',    label: 'Mine' },
@@ -257,6 +262,8 @@ const actionError  = ref('')
 const confirmingId = ref(null)  // split awaiting step two of Archive/Leave
 const busyId       = ref(null)  // split whose Archive/Leave request is in flight
 
+// Read from the query on mount, before it's stripped.
+
 // `role` is the caller's relationship to the split. Anything that isn't
 // explicitly "member" is treated as owned so an older backend without the
 // field still lists everything under Mine rather than hiding it.
@@ -265,7 +272,9 @@ const invited = computed(() => splits.value.filter(isMember))
 const visible = computed(() => (tab.value === 'invited' ? invited.value : mine.value))
 const counts  = computed(() => ({ mine: mine.value.length, invited: invited.value.length }))
 
-onMounted(load)
+onMounted(() => {
+  load()
+})
 watch(showArchived, load)
 watch(tab, (t) => {
   confirmingId.value = null

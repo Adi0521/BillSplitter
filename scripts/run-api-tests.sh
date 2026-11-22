@@ -24,9 +24,12 @@ psql_bin="$(command -v psql || echo /opt/homebrew/opt/libpq/bin/psql)"
 [[ -x "$BIN" ]] || { echo "backend not built — run: cd backend && cmake --build build -j8" >&2; exit 1; }
 
 server_pid=""
+unconfigured_pid=""
 cleanup() {
-    [[ -n "$server_pid" ]] && kill "$server_pid" 2>/dev/null || true
-    wait "$server_pid" 2>/dev/null || true
+    for pid in "$server_pid" "$unconfigured_pid"; do
+        [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+        [[ -n "$pid" ]] && wait "$pid" 2>/dev/null || true
+    done
 }
 trap cleanup EXIT
 
@@ -40,6 +43,10 @@ PGOPTIONS='-c client_min_messages=warning' "$psql_bin" "$ADMIN_URL" -v ON_ERROR_
 echo "==> applying migrations"
 DATABASE_URL="$TEST_URL" ./scripts/migrate.sh >/dev/null
 
+# A second instance with neither GOOGLE_CLIENT_ID nor AUTH_FAKE_IDENTITY, so the
+# "Google sign-in is not configured" 503 is exercised rather than assumed.
+UNCONFIGURED_PORT="${BILLSPLITTER_UNCONFIGURED_PORT:-$((PORT + 1))}"
+
 echo "==> starting backend on :$PORT"
 # Plain mktemp: "-t PREFIX" is BSD syntax that GNU coreutils rejects with
 # "too few X's in template", so the -t form works on macOS and fails on Linux —
@@ -47,8 +54,15 @@ echo "==> starting backend on :$PORT"
 log="$(mktemp)"
 # A low failure ceiling makes the throttle reachable in a test without
 # hundreds of requests. Everything else runs at its production default.
+# AUTH_FAKE_IDENTITY makes the Google callback accept a crafted code instead of
+# calling Google, so the suite runs offline and deterministically. It is only
+# honoured when GOOGLE_CLIENT_ID is unset, and the server shouts about it at
+# startup — it can never be on in a deployed environment, where that variable is
+# set. BILLSPLITTER_TEST_DB_URL lets a couple of tests build states the HTTP API
+# cannot reach on its own (e.g. a verified account that still has a password).
 DATABASE_URL="$TEST_URL" PORT="$PORT" APP_BASE_URL="http://localhost:5173" \
     LOGIN_MAX_FAILURES="${LOGIN_MAX_FAILURES:-5}" \
+    AUTH_FAKE_IDENTITY=1 \
     "$BIN" >"$log" 2>&1 &
 server_pid=$!
 
@@ -60,6 +74,14 @@ done
 curl -sf -m 2 "http://localhost:$PORT/api/health" >/dev/null || {
     echo "server never became healthy:"; cat "$log"; exit 1; }
 
+DATABASE_URL="$TEST_URL" PORT="$UNCONFIGURED_PORT" APP_BASE_URL="http://localhost:5173" \
+    "$BIN" >"${log}.unconfigured" 2>&1 &
+unconfigured_pid=$!
+for _ in $(seq 1 40); do
+    curl -sf -m 1 "http://localhost:$UNCONFIGURED_PORT/api/health" >/dev/null 2>&1 && break
+    sleep 0.25
+done
+
 echo "==> running tests"
 set +e
 # -t must equal -s so that tests/api lands on sys.path and `from harness
@@ -68,6 +90,8 @@ pattern="test_*.py"
 [[ $# -ge 1 ]] && pattern="$1.py"
 BILLSPLITTER_TEST_URL="http://localhost:$PORT" \
     LOGIN_MAX_FAILURES="${LOGIN_MAX_FAILURES:-5}" \
+    BILLSPLITTER_TEST_DB_URL="$TEST_URL" \
+    BILLSPLITTER_UNCONFIGURED_URL="http://localhost:$UNCONFIGURED_PORT" \
     python3 -m unittest discover -s tests/api -t tests/api -p "$pattern" -v
 status=$?
 set -e

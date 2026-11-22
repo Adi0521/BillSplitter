@@ -356,5 +356,104 @@ class TestNoPasswordMaterialAnywhere(ApiTestCase, unittest.TestCase):
                                      f"{label} leaked {marker!r}: {resp.body[:300]}")
 
 
+class TestPasswordlessAccounts(ApiTestCase, unittest.TestCase):
+    """Migration 006 made password_hash nullable, so a row can now exist with no
+    password at all: a Google-only account.
+
+    Two things must hold. Registration must still work exactly as before — the
+    columns are optional, not gone. And a password login against an account that
+    has no password must be indistinguishable from a wrong password: same status,
+    same message, and comparable timing. "This account has no password" tells an
+    attacker the address is registered *and* that it is worth phishing a Google
+    account for instead.
+    """
+
+    def google_only_account(self):
+        """An email whose account exists but has no password. Skips when the
+        server under test has no Google sign-in (the routes are registered in
+        main.cpp, and the flow needs AUTH_FAKE_IDENTITY=1)."""
+        from test_google_auth import GClient, fresh_sub, sign_in
+
+        probe = GClient().get("/api/auth/google/start")
+        if probe.status != 302:
+            self.skipTest("Google sign-in unavailable on this server "
+                          f"(/api/auth/google/start answered {probe.status})")
+        email = fresh_email()
+        self.assertStatus(sign_in(GClient(), fresh_sub(), email), 302)
+        return email
+
+    def test_registering_a_password_account_still_works(self):
+        email = fresh_email()
+        reg = Client().post("/api/auth/register",
+                            {"email": email, "password": PASSWORD, "display_name": "Pat"})
+        self.assertStatus(reg, 201)
+
+        # Both password columns are still written, so the account still logs in.
+        back = Client()
+        back.login(email, PASSWORD)
+        self.assertEqual(back.user["id"], reg.json["id"])
+
+    def test_login_against_a_google_only_account_is_the_wrong_password_401(self):
+        email = self.google_only_account()
+        passwordless = Client().post("/api/auth/login",
+                                     {"email": email, "password": PASSWORD})
+
+        reference = new_user()
+        wrong = Client().post("/api/auth/login",
+                              {"email": reference.user["email"],
+                               "password": "wrongwrongwrong"})
+
+        self.assertError(passwordless, 401)
+        self.assertEqual(passwordless.status, wrong.status)
+        self.assertEqual(passwordless.json, wrong.json,
+                         "a passwordless account must fail exactly as a wrong "
+                         "password does, message included")
+        for marker in ["google", "no password", "passwordless", "unset"]:
+            self.assertNotIn(marker, passwordless.body.lower(),
+                             "the failure must not hint at why it failed")
+
+    def test_login_against_a_google_only_account_creates_no_session(self):
+        email = self.google_only_account()
+        attacker = Client()
+        self.assertError(attacker.post("/api/auth/login",
+                                       {"email": email, "password": PASSWORD}), 401)
+        self.assertError(attacker.get("/api/auth/me"), 401)
+
+    def test_a_passwordless_login_still_pays_the_hashing_cost(self):
+        """Returning early for a row with no password would make that response
+        measurably faster than a wrong password, which is a timing oracle for
+        "this address is Google-only". The dummy-hash comparison in
+        verify_credentials exists to prevent it, and nothing else would catch its
+        removal — every status code and body stays identical.
+
+        Deliberately loose (40% of the reference) so it fails on a skipped
+        PBKDF2, not on a busy machine.
+        """
+        def best_of_three(email, password):
+            times = []
+            for _ in range(3):
+                started = time.monotonic()
+                r = Client().post("/api/auth/login",
+                                  {"email": email, "password": password})
+                times.append(time.monotonic() - started)
+                self.assertStatus(r, 401)
+            return min(times)
+
+        reference = new_user()
+        wrong_password = best_of_three(reference.user["email"], "wrongwrongwrong")
+        google_only = best_of_three(self.google_only_account(), PASSWORD)
+        unknown = best_of_three(fresh_email(), PASSWORD)
+
+        floor = wrong_password * 0.4
+        self.assertGreater(google_only, floor,
+                           f"a Google-only account answered in {google_only:.3f}s vs "
+                           f"{wrong_password:.3f}s for a wrong password: the PBKDF2 "
+                           "work is being skipped")
+        self.assertGreater(unknown, floor,
+                           f"an unknown email answered in {unknown:.3f}s vs "
+                           f"{wrong_password:.3f}s for a wrong password: the PBKDF2 "
+                           "work is being skipped")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -105,6 +105,8 @@ reads — the Dockerfile's `PORT=8080` is only a default.
 | `PORT` | no | `8080` | Most platforms inject this |
 | `SESSION_COOKIE_SAMESITE` | no | `Lax` | Set `None` **only** for a cross-origin frontend |
 | `SESSION_COOKIE_SECURE` | no | `auto` | `auto` = on when `APP_BASE_URL` is https |
+| `GOOGLE_CLIENT_ID` | no | — | From Google Cloud Console. Absent → Google sign-in returns 503 and the UI hides it |
+| `GOOGLE_CLIENT_SECRET` | no | — | Required alongside the client id |
 | `LOGIN_MAX_FAILURES` | no | `10` | Failed sign-ins per email+IP before a 429 |
 | `LOGIN_THROTTLE_WINDOW_SECONDS` | no | `900` | Window those failures are counted over |
 | `BILLSPLITTER_OCR_POOL` | no | `4` | Tesseract engines held in memory |
@@ -164,6 +166,34 @@ to send the cookie:
 
 `VITE_*` variables are inlined at **build** time, so changing this needs a
 rebuild, and nothing secret may go in one: it ships in the bundle.
+
+## Sign in with Google
+
+Free — no mail service and no domain needed. In the Google Cloud Console:
+
+1. Create a project, then **APIs & Services → OAuth consent screen**. Scopes are
+   just `openid`, `email`, `profile`; nothing sensitive.
+2. **Credentials → Create OAuth client ID → Web application.**
+3. Authorized redirect URI — **exactly** this, on the frontend's origin, not the
+   backend's:
+   ```
+   https://<your-vercel-app>.vercel.app/api/auth/google/callback
+   ```
+   The frontend proxies `/api/*` to the backend, so the browser stays on one
+   origin the whole way through and the session cookie is set on the site the
+   user is actually looking at. Add `http://localhost:5173/api/auth/google/callback`
+   for local development.
+4. Put the client id and secret into the backend's environment.
+
+While the consent screen is unpublished, only the test accounts you list can
+sign in. Publishing with these scopes should not need Google's full security
+review, but check the current requirements in the console — an unverified app
+shows users a warning screen.
+
+**`AUTH_FAKE_IDENTITY` must never be set in a deployed environment.** It makes
+the callback accept a crafted code and sign in as any address, and it exists so
+the test suite can run offline. The server ignores it whenever `GOOGLE_CLIENT_ID`
+is set and logs an error saying so, but do not rely on that as the only guard.
 
 ## Put a reverse proxy in front
 

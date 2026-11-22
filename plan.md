@@ -511,6 +511,21 @@ cd frontend && npm install && npm run dev
 - [ ] FX rate fetcher service + daily refresh background thread
 - [ ] Currency selector in split/bill creation
 
+### Auth — Google sign-in
+- [x] Sign in with Google (`openid email profile`), free, no mail service or
+      domain required. Authorization-code flow exchanged server-side, so the ID
+      token arrives over TLS from Google and needs no local signature check.
+- [x] `email_verified` on users, and seat matching gated on it — the feature
+      that made email-based sharing safe. The rule lives inside the SQL function
+      `link_seats_by_verified_email()`, not at its call sites.
+- [x] Squatter eviction: a Google sign-in onto an existing *unverified* password
+      account links, verifies, and clears the password. Destructive on purpose,
+      and reported to the user rather than silent.
+- [ ] **Password reset.** Still missing, and a cleared password is
+      unrecoverable. Much less severe now — anyone who used Google has Google as
+      a recovery path — but a password-only user who forgets is locked out.
+      Needs a mail service (see DEPLOYMENT.md).
+
 ### Phase 8 — Polish
 - [ ] **Request body cap.** Crow buffers the whole body before dispatch and has
       no app-level limit, so the 10 MB receipt cap only binds cooperative
